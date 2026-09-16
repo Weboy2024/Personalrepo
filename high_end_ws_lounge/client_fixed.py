@@ -1670,6 +1670,34 @@ def membership_status():
         return jsonify({"status": "error", "message": "No membership found"})
 
     _expire_membership_if_needed(membership)
+
+    member_status = "PAUSED" if getattr(membership, "is_paused", False) else (
+        "CHECKED_IN" if membership.is_checked_in else "NOT_CHECKED_IN"
+    )
+    remaining_seconds = max(0, int(float(membership.hours_left or 0) * 3600))
+    elapsed_seconds = 0
+    active_log = AttendanceLog.query.filter_by(
+        membership_id=membership.id,
+        check_out_time=None
+    ).order_by(AttendanceLog.check_in_time.desc()).first()
+    if active_log and active_log.check_in_time and membership.is_checked_in:
+        check_in_time = active_log.check_in_time
+        if check_in_time.tzinfo is None:
+            check_in_time = ph_tz.localize(check_in_time)
+        reference_time = datetime.now(ph_tz)
+        is_paused = bool(getattr(membership, "is_paused", False) or getattr(active_log, "is_paused", False))
+        paused_at = getattr(active_log, "paused_at", None) or getattr(membership, "paused_at", None)
+        if is_paused and paused_at:
+            if paused_at.tzinfo is None:
+                paused_at = ph_tz.localize(paused_at)
+            reference_time = paused_at
+        accumulated_paused = (
+            getattr(active_log, "accumulated_paused_seconds", 0)
+            or getattr(membership, "accumulated_paused_seconds", 0)
+            or 0
+        )
+        elapsed_seconds = max(0, int((reference_time - check_in_time).total_seconds() - accumulated_paused))
+        remaining_seconds = max(0, int(float(membership.total_hours or 0) * 3600) - elapsed_seconds)
     
     expiry_iso = None
     if membership.expiry_date:
@@ -1681,9 +1709,14 @@ def membership_status():
     return jsonify({
         "status": "success",
         "hours_left": membership.hours_left,
+        "remaining_seconds": remaining_seconds,
+        "elapsed_seconds": elapsed_seconds,
+        "total_seconds": int(float(membership.total_hours or 0) * 3600),
+        "is_countdown_active": bool(membership.is_checked_in and member_status == "CHECKED_IN"),
         "is_checked_in": membership.is_checked_in,
         "is_active": membership.is_active,
         "is_paused": bool(getattr(membership, 'is_paused', False)),
+        "member_status": member_status,
         "plan_name": membership.plan_name,
         "expiry_date": expiry_iso,
         "accumulated_hours": 0.0
@@ -1761,6 +1794,12 @@ def membership_current_session():
         "elapsed_seconds": elapsed_seconds,
         "remaining_seconds": remaining_seconds,
         "is_paused": is_paused,
+        "member_status": "PAUSED" if is_paused else "CHECKED_IN",
+        "paused_at": (
+            (getattr(current_session, 'paused_at', None) or getattr(membership, 'paused_at', None)).isoformat()
+            if (getattr(current_session, 'paused_at', None) or getattr(membership, 'paused_at', None)) else None
+        ),
+        "accumulated_paused_seconds": accumulated_paused,
         "membership_id": membership.id,
         "hours_left": membership.hours_left
     })

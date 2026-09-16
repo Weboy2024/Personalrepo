@@ -22,7 +22,7 @@ from werkzeug.utils import secure_filename
 from flask_login import current_user, login_required
 from sqlalchemy import and_, func, inspect, or_, text
 from time_utils import format_checkin_time, format_checkout_time, format_date, decimal_hours_to_readable
-from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, send_file, url_for
+from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 
@@ -712,16 +712,39 @@ def resume_reservation(id):
 
 # (Global Notification Context Processor)
 
+def _admin_notification_counts():
+    requests_seen_at = session.get("admin_requests_seen_at")
+    members_seen_at = session.get("admin_members_seen_at")
+    try:
+        requests_seen_at = datetime.fromisoformat(requests_seen_at) if requests_seen_at else None
+    except (TypeError, ValueError):
+        requests_seen_at = None
+    try:
+        members_seen_at = datetime.fromisoformat(members_seen_at) if members_seen_at else None
+    except (TypeError, ValueError):
+        members_seen_at = None
+
+    pending_plans_query = SoloPlan.query.filter_by(status="pending")
+    if requests_seen_at:
+        pending_plans_query = pending_plans_query.filter(SoloPlan.created_at > requests_seen_at)
+
+    new_members_query = Membership.query.filter_by(
+        status="active",
+        member_list_notification_seen=False
+    )
+    if members_seen_at:
+        new_members_query = new_members_query.filter(Membership.updated_at > members_seen_at)
+
+    return (
+        Reservation.query.filter_by(status="Pending").count(),
+        pending_plans_query.count(),
+        new_members_query.count(),
+    )
+
 @admin_bp.app_context_processor
 def inject_sidebar_notifications():
     if current_user.is_authenticated and getattr(current_user, 'role', '') in ['admin', 'staff']:
-        p_res = Reservation.query.filter_by(status="Pending").count()
-        p_plans = SoloPlan.query.filter_by(status="pending").count()
-
-        p_new_members = Membership.query.filter_by(
-            status="active",
-            member_list_notification_seen=False
-        ).count()
+        p_res, p_plans, p_new_members = _admin_notification_counts()
 
         return dict(
             pending_reservations_count=p_res,
@@ -742,12 +765,7 @@ def get_admin_notifications_count():
     if current_user.role not in ['admin', 'staff']:
         return jsonify({'error': 'Unauthorized'}), 403
 
-    p_res = Reservation.query.filter_by(status="Pending").count()
-    p_plans = SoloPlan.query.filter_by(status="pending").count()
-    p_new_members = Membership.query.filter_by(
-        status="active",
-        member_list_notification_seen=False
-    ).count()
+    p_res, p_plans, p_new_members = _admin_notification_counts()
 
     return jsonify({
         'pending_reservations': p_res,
@@ -757,6 +775,37 @@ def get_admin_notifications_count():
         'dashboard_notifications': p_res,
         'total_notifications': p_res + p_plans + p_new_members
     })
+
+
+@admin_bp.route('/api/admin/notifications/clear-nav', methods=['POST'])
+@login_required
+def clear_admin_members_navigation_notifications():
+    if current_user.role not in ['admin', 'staff']:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    now = datetime.utcnow()
+    session['admin_requests_seen_at'] = now.isoformat()
+    session['admin_members_seen_at'] = now.isoformat()
+    session.modified = True
+    return jsonify({'success': True})
+
+
+@admin_bp.route('/api/admin/notifications/clear-tab', methods=['POST'])
+@login_required
+def clear_admin_members_tab_notifications():
+    if current_user.role not in ['admin', 'staff']:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    tab = request.args.get('tab')
+    if tab == 'requests':
+        session['admin_requests_seen_at'] = datetime.utcnow().isoformat()
+    elif tab in ['members', 'list']:
+        session['admin_members_seen_at'] = datetime.utcnow().isoformat()
+    else:
+        return jsonify({'success': False, 'message': 'Unknown notification tab.'}), 400
+
+    session.modified = True
+    return jsonify({'success': True})
 
 
 @admin_bp.route('/payment_settings', methods=['GET', 'POST'])
@@ -2272,6 +2321,14 @@ def members():
         approved_solo_user_ids=approved_solo_user_ids,
     )
 
+
+def _record_member_activity(user_id, activity_type):
+    db.session.add(UserActivityLog(
+        user_id=user_id,
+        activity_type=f"attendance|{activity_type}",
+        ip_address=request.remote_addr or "unknown",
+    ))
+
 # PERMANENT DELETE ROUTE
 @admin_bp.route("/delete_member/<int:user_id>", methods=["POST"])
 @login_required
@@ -2468,6 +2525,7 @@ def membership_check_in(user_or_membership_id):
         accumulated_paused_seconds=0  # FORCE 0 HERE FOR MEMBER DASHBOARD
     )
     db.session.add(log)
+    _record_member_activity(user.id, "Check-In")
     db.session.commit()
     db.session.expire_all()
 
@@ -2475,7 +2533,13 @@ def membership_check_in(user_or_membership_id):
         "status": "success",
         "message": f"{user.name} checked in successfully!",
         "check_in_time": now_ph.isoformat(),
-        "expires_on": calculated_expiry.isoformat()
+        "expires_on": calculated_expiry.isoformat(),
+        "new_plan_duration": f"{int(allocated_hours):02d}h 00m 00s",
+        "new_log": {
+            "action": "Check-In",
+            "description": "Session started",
+            "timestamp": now_ph.strftime("%b %d, %Y - %I:%M %p")
+        }
     })
 
 @admin_bp.route("/api/member/<int:user_or_membership_id>/toggle-pause", methods=["POST"])
@@ -2522,7 +2586,7 @@ def membership_toggle_pause(user_or_membership_id):
     
     # IMPORTANTE: I-update ang status column sang Membership!
     if hasattr(membership, 'status'):
-        membership.status = "Paused" if target_pause_state else "Checked In"
+        membership.status = "active"
 
     # ==========================================
     # B. TOGGLE ATTENDANCE LOG PAUSE STATE
@@ -2556,11 +2620,21 @@ def membership_toggle_pause(user_or_membership_id):
             active_solo.paused_at = None
 
     # Save sa Database
+    _record_member_activity(membership.user_id, "Paused" if target_pause_state else "Resumed")
     db.session.commit()
 
     user_name = membership.user.name if (membership and membership.user) else "Member"
     action_str = "PAUSED" if target_pause_state else "RESUMED"
     new_status_str = "Paused" if target_pause_state else "Checked In"
+    remaining_seconds = 0
+    if current_log and current_log.check_in_time:
+        reference_time = now_ph if not target_pause_state else (current_log.paused_at or now_ph)
+        accumulated_paused = current_log.accumulated_paused_seconds or 0
+        elapsed_seconds = max(0, int((reference_time - current_log.check_in_time).total_seconds() - accumulated_paused))
+        remaining_seconds = max(0, int(float(membership.total_hours or 0) * 3600) - elapsed_seconds)
+    hours = remaining_seconds // 3600
+    minutes = (remaining_seconds % 3600) // 60
+    seconds = remaining_seconds % 60
     
     return jsonify({
         "status": "success",
@@ -2568,6 +2642,13 @@ def membership_toggle_pause(user_or_membership_id):
         "is_paused": target_pause_state,
         "member_status": new_status_str,
         "user_name": user_name
+        ,"remaining_seconds": remaining_seconds
+        ,"remaining_time_str": f"{hours:02d}h {minutes:02d}m {seconds:02d}s"
+        ,"log_entry": {
+            "action": "Paused" if target_pause_state else "Resumed",
+            "description": "Session paused" if target_pause_state else "Session resumed",
+            "timestamp": now_ph.strftime("%b %d, %Y - %I:%M %p")
+        }
     })
 
 
@@ -2627,6 +2708,7 @@ def membership_check_out(user_or_membership_id):
             current_log.hours_deducted = hours_deducted
             current_log.is_paused = False
             current_log.paused_at = None
+            _record_member_activity(target_user_id, "Checked-Out")
 
     # I-set ang status flags sa CHECKED OUT
     if membership:
@@ -2664,10 +2746,71 @@ def member_attendance_history(membership_id):
         return redirect_response
 
     membership = Membership.query.get_or_404(membership_id)
+    ph_tz = pytz.timezone("Asia/Manila")
+    now_ph = datetime.now(ph_tz)
     
     logs = membership.attendance_logs.order_by(AttendanceLog.check_in_time.desc()).all()
+
+    active_log = next((log for log in logs if log.check_out_time is None), None)
+    remaining_seconds = max(0, int(round(float(membership.hours_left or 0) * 3600)))
+    is_paused = bool(getattr(membership, "is_paused", False))
+    if active_log and active_log.check_in_time and membership.is_checked_in:
+        check_in_time = active_log.check_in_time
+        if check_in_time.tzinfo is None:
+            check_in_time = ph_tz.localize(check_in_time)
+
+        is_paused = is_paused or bool(getattr(active_log, "is_paused", False))
+        reference_time = now_ph
+        paused_at = getattr(active_log, "paused_at", None) or getattr(membership, "paused_at", None)
+        if is_paused and paused_at:
+            if paused_at.tzinfo is None:
+                paused_at = ph_tz.localize(paused_at)
+            reference_time = paused_at
+
+        accumulated_paused = (
+            getattr(active_log, "accumulated_paused_seconds", 0)
+            or getattr(membership, "accumulated_paused_seconds", 0)
+            or 0
+        )
+        elapsed_seconds = max(0, int((reference_time - check_in_time).total_seconds() - accumulated_paused))
+        remaining_seconds = max(0, int(float(membership.total_hours or 0) * 3600) - elapsed_seconds)
     
     attendance_data = []
+
+    activity_query = UserActivityLog.query.filter(
+        UserActivityLog.user_id == membership.user_id,
+        UserActivityLog.activity_type.like("attendance|%")
+    )
+    if active_log and active_log.check_in_time:
+        activity_query = activity_query.filter(
+            UserActivityLog.activity_time >= active_log.check_in_time
+        )
+    else:
+        activity_query = activity_query.filter(UserActivityLog.id == -1)
+    activity_rows = activity_query.order_by(UserActivityLog.activity_time.desc()).limit(50).all()
+
+    activity_data = []
+    for activity in activity_rows:
+        activity_name = activity.activity_type.split("|", 1)[-1]
+        activity_time = activity.activity_time
+        activity_details = {
+            "Check-In": "Session started",
+            "Paused": "Session paused",
+            "Resumed": "Session resumed",
+        }.get(activity_name, "Session ended")
+        if activity_name == "Checked-Out":
+            latest_completed_log = next((log for log in logs if log.check_out_time), None)
+            if latest_completed_log and latest_completed_log.hours_deducted:
+                activity_details = (
+                    f"{decimal_hours_to_readable(latest_completed_log.hours_deducted)} used; "
+                    f"{membership.hours_left:.2f} hrs remaining"
+                )
+        activity_data.append({
+            "id": f"activity-{activity.id}",
+            "event": activity_name,
+            "timestamp": activity_time.strftime("%b %d, %Y - %I:%M %p") if activity_time else "-",
+            "details": activity_details,
+        })
 
     for log in logs:
         c_in = log.check_in_time
@@ -2685,13 +2828,36 @@ def member_attendance_history(membership_id):
             "check_out": check_out_str,
             "hours": decimal_hours_to_readable(log.hours_deducted) if (log.hours_deducted and log.hours_deducted > 0) else "-"
         })
+
+    # Older sessions predate discrete activity rows, so retain useful history for them.
+    if not activity_data:
+        for log in logs[:25]:
+            if log.check_in_time:
+                activity_data.append({
+                    "id": f"check-in-{log.id}",
+                    "event": "Check-In",
+                    "timestamp": log.check_in_time.strftime("%b %d, %Y - %I:%M %p"),
+                    "details": "Session started",
+                })
+            if log.check_out_time:
+                activity_data.append({
+                    "id": f"check-out-{log.id}",
+                    "event": "Checked-Out",
+                    "timestamp": log.check_out_time.strftime("%b %d, %Y - %I:%M %p"),
+                    "details": f"{decimal_hours_to_readable(log.hours_deducted) if log.hours_deducted else '-'} used",
+                })
     
     return jsonify({
         "status": "success",
         "member_name": membership.user.name,
         "total_hours": membership.total_hours,
         "hours_left": membership.hours_left,
-        "attendance": attendance_data
+        "remaining_seconds": remaining_seconds,
+        "check_in_time": active_log.check_in_time.isoformat() if active_log and active_log.check_in_time else None,
+        "is_checked_in": bool(membership.is_checked_in),
+        "is_paused": is_paused,
+        "attendance": attendance_data,
+        "activity_logs": activity_data,
     })
 
 

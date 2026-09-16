@@ -21,14 +21,357 @@ document.addEventListener('DOMContentLoaded', function() {
         showToastFallback(message, type);
     }
 
+    const remainingTimeIntervals = new WeakMap();
+
+    function formatRemainingTime(remainingSeconds) {
+        const totalSeconds = Math.max(0, Math.floor(Number(remainingSeconds) || 0));
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+        return `${String(hours).padStart(2, '0')}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+    }
+
+    function updateRemainingTimeBadge(card, remainingSeconds, isPaused, isSessionActive = true) {
+        const badge = card?.querySelector('.remaining-time-badge strong');
+        if (!badge) return;
+
+        const previousInterval = remainingTimeIntervals.get(card);
+        if (previousInterval) clearInterval(previousInterval);
+
+        let currentSeconds = Math.max(0, Math.floor(Number(remainingSeconds) || 0));
+        const render = () => {
+            badge.textContent = formatRemainingTime(currentSeconds);
+            if (currentSeconds > 0 && isSessionActive && !isPaused) currentSeconds -= 1;
+        };
+
+        render();
+        if (isSessionActive && !isPaused && currentSeconds > 0) {
+            remainingTimeIntervals.set(card, setInterval(render, 1000));
+        } else {
+            remainingTimeIntervals.delete(card);
+            badge.closest('.remaining-time-badge').style.backgroundColor = '#edf2f7';
+            badge.style.color = '#718096';
+        }
+    }
+
+    function renderMemberActivityLogs(container, activityLogs) {
+        container.replaceChildren();
+
+        if (!Array.isArray(activityLogs) || activityLogs.length === 0) {
+            const empty = document.createElement('p');
+            empty.className = 'member-activity-log-empty';
+            empty.textContent = 'No activity recorded yet.';
+            container.appendChild(empty);
+            return;
+        }
+
+        activityLogs.forEach((activity) => {
+            const item = document.createElement('div');
+            item.className = 'member-activity-log';
+
+            const event = document.createElement('div');
+            event.className = 'member-activity-log-event';
+            event.textContent = activity.event || 'Session activity';
+            event.style.color = activity.event === 'Paused' ? '#d69e2e' : '#38a169';
+
+            const timestamp = document.createElement('p');
+            timestamp.className = 'member-activity-log-time';
+            timestamp.textContent = activity.timestamp || '-';
+
+            const details = document.createElement('p');
+            details.className = 'member-activity-log-details';
+            details.textContent = activity.details || '';
+
+            item.append(event, timestamp, details);
+            container.appendChild(item);
+        });
+    }
+
+    async function refreshMemberActivityLogs(membershipId, card) {
+        const targetCard = card || document.querySelector(
+            `.member-list-card[data-membership-id="${membershipId}"], .member-list-card[data-user-id="${membershipId}"]`
+        );
+        const logContainer = targetCard?.querySelector('.member-activity-logs');
+        if (!logContainer || !membershipId) return;
+
+        try {
+            const response = await fetch(`/admin/api/member/${membershipId}/attendance`);
+            const data = await response.json();
+            if (!response.ok || data.status !== 'success') {
+                throw new Error(data.message || 'Unable to load activity.');
+            }
+            renderMemberActivityLogs(logContainer, data.activity_logs);
+
+            const fallbackSeconds = Number(data.hours_left || 0) * 3600;
+            updateRemainingTimeBadge(
+                targetCard,
+                data.remaining_seconds !== undefined ? data.remaining_seconds : fallbackSeconds,
+                Boolean(data.is_paused),
+                data.is_checked_in === true
+            );
+
+            const visitCount = targetCard.querySelector('.member-activity-logs-count');
+            if (visitCount && Array.isArray(data.attendance)) {
+                visitCount.dataset.visitCount = String(data.attendance.length);
+                visitCount.textContent = `Daily session history ${data.attendance.length} visits`;
+            }
+        } catch (error) {
+            logContainer.replaceChildren();
+            const message = document.createElement('p');
+            message.className = 'member-activity-log-empty';
+            message.textContent = 'Activity unavailable.';
+            logContainer.appendChild(message);
+            console.warn('Member activity fetch failed:', error);
+        }
+    }
+
+    window.refreshMemberActivityLogs = refreshMemberActivityLogs;
+
+    function appendActivityRow(container, entry) {
+        if (!container || !entry) return;
+        const row = document.createElement('div');
+        row.className = 'member-activity-log';
+
+        const event = document.createElement('div');
+        event.className = 'member-activity-log-event';
+        event.textContent = entry.action || 'Session activity';
+        event.style.color = entry.action === 'Paused' ? '#d69e2e' : '#38a169';
+
+        const timestamp = document.createElement('div');
+        timestamp.className = 'member-activity-log-time';
+        timestamp.textContent = entry.timestamp || '-';
+
+        const details = document.createElement('div');
+        details.className = 'member-activity-log-details';
+        details.textContent = entry.description || 'Session activity';
+
+        row.append(event, timestamp, details);
+        container.replaceChildren(row);
+    }
+
+    function updateCheckedInCard(card, membershipId, userId, result) {
+        if (!card) return;
+        const sessionGroup = card.querySelector('.session-action-group');
+        const memberName = card.querySelector('.member-name')?.textContent.trim() || 'Member';
+        if (sessionGroup) {
+            sessionGroup.replaceChildren();
+
+            const checkedInButton = document.createElement('button');
+            checkedInButton.className = 'btn-check-in disabled-btn';
+            checkedInButton.type = 'button';
+            checkedInButton.disabled = true;
+            checkedInButton.textContent = 'Checked In';
+
+            const pauseButton = document.createElement('button');
+            pauseButton.className = 'btn-pause-session btn-secondary';
+            pauseButton.type = 'button';
+            pauseButton.id = `pause-btn-${membershipId}`;
+            pauseButton.dataset.membershipId = membershipId;
+            pauseButton.dataset.memberId = userId;
+            pauseButton.dataset.memberName = memberName;
+            pauseButton.dataset.isPaused = 'false';
+            pauseButton.textContent = 'Pause Session';
+            pauseButton.onclick = () => window.handlePauseClick(pauseButton);
+
+            const checkoutButton = document.createElement('button');
+            checkoutButton.className = 'btn-deactivate';
+            checkoutButton.type = 'button';
+            checkoutButton.textContent = 'Check-Out Customer';
+            checkoutButton.onclick = () => window.handleCheckout(userId);
+
+            sessionGroup.append(checkedInButton, pauseButton, checkoutButton);
+        }
+
+        const status = card.querySelector(`#status-text-${CSS.escape(userId)}`);
+        if (status) {
+            status.textContent = 'Checked In';
+            status.classList.remove('status-paused');
+            status.classList.add('status-checkin');
+        }
+
+        const renewButton = card.querySelector('.renew-btn');
+        if (renewButton) {
+            renewButton.disabled = true;
+            renewButton.style.opacity = '0.65';
+            renewButton.style.cursor = 'not-allowed';
+        }
+
+        const logs = card.querySelector('.member-activity-logs');
+        if (logs) {
+            logs.replaceChildren();
+            appendActivityRow(logs, result.new_log || {
+                action: 'Check-In',
+                description: 'Session started',
+                timestamp: result.check_in_time || new Date().toLocaleString()
+            });
+        }
+    }
+
+    async function handleCheckoutWithoutReload(userId) {
+        const card = document.querySelector(`.member-list-card[data-user-id="${userId}"]`);
+        if (!card || typeof Swal === 'undefined') return;
+
+        const result = await Swal.fire({
+            title: 'Check Out',
+            text: 'Check out this member now?',
+            icon: 'question',
+            showCancelButton: true,
+            confirmButtonColor: '#7367f0',
+            cancelButtonColor: '#6e7881',
+            confirmButtonText: 'Confirm',
+            cancelButtonText: 'Cancel'
+        });
+        if (!result.isConfirmed) return;
+
+        try {
+            const response = await fetch(`/admin/api/member/${userId}/check-out`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const data = await response.json();
+            if (data.status !== 'success') {
+                await Swal.fire('Error!', data.message || 'Unable to check out member.', 'error');
+                return;
+            }
+
+            const sessionGroup = card.querySelector('.session-action-group');
+            if (sessionGroup) {
+                sessionGroup.replaceChildren();
+                const checkedOutButton = document.createElement('button');
+                checkedOutButton.type = 'button';
+                checkedOutButton.className = 'btn-deactivate';
+                checkedOutButton.disabled = true;
+                checkedOutButton.textContent = 'Checked Out';
+                sessionGroup.appendChild(checkedOutButton);
+            }
+
+            const status = card.querySelector(`#status-text-${CSS.escape(userId)}`);
+            if (status) {
+                status.textContent = 'Checked Out';
+                status.classList.remove('status-checkin', 'status-paused');
+            }
+
+            const logs = card.querySelector('.member-activity-logs');
+            if (logs) logs.replaceChildren();
+            updateRemainingTimeBadge(card, Number(data.hours_left || 0) * 3600, false, false);
+
+            const renewButton = card.querySelector('.renew-btn');
+            if (renewButton) {
+                renewButton.disabled = false;
+                renewButton.style.opacity = '';
+                renewButton.style.cursor = 'pointer';
+            }
+
+            await Swal.fire({
+                title: 'Success!',
+                text: data.message,
+                icon: 'success',
+                timer: 1500,
+                showConfirmButton: false
+            });
+        } catch (error) {
+            console.error('Checkout error:', error);
+            await Swal.fire('Error!', 'Something went wrong.', 'error');
+        }
+    }
+
+    window.handleCheckout = handleCheckoutWithoutReload;
+
+    document.querySelectorAll('.member-activity-logs').forEach((container) => {
+        const card = container.closest('.member-list-card');
+        refreshMemberActivityLogs(container.dataset.activityMembershipId, card);
+    });
+
 
     // === 1. TAB SWITCHING LOGIC ===
     const tabButtons = document.querySelectorAll('.tab-btn');
     const tabPanels = document.querySelectorAll('.tab-panel');
 
+    async function clearMemberNotificationTab(tabName, badgeId) {
+        const badge = document.getElementById(badgeId);
+        const currentCount = Number(badge?.textContent || 0);
+        if (badge) {
+            badge.textContent = '0';
+            badge.style.display = 'none';
+            badge.classList.add('d-none');
+        }
+        sessionStorage.setItem(`${tabName}_tab_badge_count`, String(currentCount));
+        try {
+            await fetch(`/admin/api/admin/notifications/clear-tab?tab=${encodeURIComponent(tabName)}`, {
+                method: 'POST',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+        } catch (error) {
+            console.warn('Unable to clear member notification badge:', error);
+        }
+    }
+
+    async function updateMemberTabNotificationBadges() {
+        try {
+            const response = await fetch('/admin/api/admin/notifications-count', {
+                headers: { 'Cache-Control': 'no-cache' }
+            });
+            if (!response.ok) return;
+            const data = await response.json();
+
+            const updateBadge = (id, count) => {
+                const badge = document.getElementById(id);
+                if (!badge) return;
+                const key = id === 'membership-request-tab-badge'
+                    ? 'requests_tab_badge_count'
+                    : 'members_tab_badge_count';
+                const dismissedCount = Number(sessionStorage.getItem(key) || 0);
+                const visibleCount = Math.max(0, Number(count || 0) - dismissedCount);
+                badge.textContent = String(visibleCount);
+                badge.style.display = visibleCount > 0 ? 'inline-flex' : 'none';
+                badge.classList.toggle('d-none', visibleCount === 0);
+            };
+
+            updateBadge('membership-request-tab-badge', data.pending_memberships);
+            updateBadge('member-list-tab-badge', data.new_members_count);
+        } catch (error) {
+            console.warn('Unable to update member tab notification badges:', error);
+        }
+    }
+
+    updateMemberTabNotificationBadges();
+    setInterval(updateMemberTabNotificationBadges, 3000);
+
+    document.addEventListener('submit', (event) => {
+        const form = event.target.closest('#requestsList form');
+        if (!form) return;
+
+        const isApproval = form.action.includes('/approve_membership/');
+        const requestsBadge = document.getElementById('membership-request-tab-badge');
+        const currentRequestCount = Number(requestsBadge?.textContent || 1);
+        const nextRequestCount = Math.max(0, currentRequestCount - 1);
+        sessionStorage.setItem('requests_tab_badge_count', String(nextRequestCount));
+        if (requestsBadge) {
+            requestsBadge.textContent = String(nextRequestCount);
+            requestsBadge.style.display = nextRequestCount > 0 ? 'inline-flex' : 'none';
+            requestsBadge.classList.toggle('d-none', nextRequestCount === 0);
+        }
+
+        if (isApproval) {
+            sessionStorage.removeItem('members_tab_badge_count');
+            const memberListBadge = document.getElementById('member-list-tab-badge');
+            if (memberListBadge) {
+                const nextCount = (Number(memberListBadge.textContent) || 0) + 1;
+                memberListBadge.textContent = String(nextCount);
+                memberListBadge.classList.remove('d-none');
+            }
+        }
+    });
+
     tabButtons.forEach(button => {
         button.addEventListener('click', () => {
             const targetTab = button.getAttribute('data-tab');
+
+            if (targetTab === 'requests') {
+                clearMemberNotificationTab('requests', 'membership-request-tab-badge');
+            } else if (targetTab === 'list') {
+                clearMemberNotificationTab('members', 'member-list-tab-badge');
+            }
 
             tabButtons.forEach(btn => btn.classList.remove('active'));
             tabPanels.forEach(panel => panel.classList.remove('active'));
@@ -236,31 +579,50 @@ document.addEventListener('DOMContentLoaded', function() {
                     return;
                 }
 
-                const table = document.createElement('table');
-                table.className = 'records-table';
-                table.innerHTML = `
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>Check In</th>
-                            <th>Check Out</th>
-                            <th>Hours</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${data.attendance.map(log => `
-                            <tr>
-                                <td>${log.date || 'N/A'}</td>
-                                <td>${log.check_in || 'N/A'}</td>
-                                <td>${log.check_out || 'N/A'}</td>
-                                <td>${log.hours || '0'}</td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                `;
+                const visitsByDate = data.attendance.reduce((groups, log) => {
+                    const date = log.date || 'Unknown date';
+                    if (!groups[date]) groups[date] = [];
+                    groups[date].push(log);
+                    return groups;
+                }, {});
 
-                body.innerHTML = `<div class="records-empty-state"><p><strong>${data.member_name}</strong> attendance history</p></div>`;
-                body.appendChild(table);
+                const visitRows = Object.entries(visitsByDate).map(([date, visits]) => visits.map(log => `
+                    <div class="history-visit-row">
+                        <div>
+                            <strong>${date}</strong>
+                            <span>${log.check_in || 'N/A'} - ${log.check_out || 'Still checked in'}</span>
+                        </div>
+                        <strong>${log.hours || '0'}</strong>
+                    </div>
+                `).join('')).join('');
+
+                const activityRows = Array.isArray(data.activity_logs) ? data.activity_logs.map(activity => `
+                    <div class="history-activity-row">
+                        <span class="history-activity-event">${activity.event || 'Session activity'}</span>
+                        <span class="history-activity-time">${activity.timestamp || 'N/A'}</span>
+                        <small>${activity.details || ''}</small>
+                    </div>
+                `).join('') : '';
+
+                body.innerHTML = `
+                    <div class="history-summary">
+                        <div>
+                            <strong>${data.member_name}</strong>
+                            <span>${Number(data.hours_left || 0).toFixed(2)} hrs remaining</span>
+                        </div>
+                        <span>${data.attendance.length} visit${data.attendance.length === 1 ? '' : 's'}</span>
+                    </div>
+                    <div class="member-history-layout">
+                        <section class="member-history-visits">
+                            <h4>Visit Days</h4>
+                            ${visitRows || '<p class="history-muted">No visits recorded.</p>'}
+                        </section>
+                        <section class="member-history-activity">
+                            <h4>Session Activity</h4>
+                            ${activityRows || '<p class="history-muted">No session activity recorded.</p>'}
+                        </section>
+                    </div>
+                `;
             } catch (err) {
                 body.innerHTML = `<div class="records-empty-state"><p>${err.message || 'Unable to retrieve history.'}</p></div>`;
             }
@@ -302,7 +664,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     return;
                 }
                 showAlert(result.message || 'Action completed successfully.', 'success');
-                window.location.reload();
+                const card = btn.closest('.member-list-card');
+                const userId = btn.dataset.userId || '';
+                updateCheckedInCard(card, membershipId, userId, result);
+                await refreshMemberActivityLogs(membershipId, card);
             } catch (err) {
                 showAlert(err.message || 'Membership action failed.', 'error');
             }
@@ -475,35 +840,63 @@ async function handlePauseClick(btnElement) {
 
         if (res.ok && data.status === 'success') {
             const newIsPaused = data.is_paused !== undefined ? data.is_paused : !isCurrentlyPaused;
+            const card = btnElement.closest('.member-list-card');
             
             // 1. Instantly Update Button Attributes
             btnElement.setAttribute('data-is-paused', newIsPaused ? 'true' : 'false');
             btnElement.innerHTML = newIsPaused ? '▶ Resume Session' : '⏸ Pause Session';
-            btnElement.style.backgroundColor = newIsPaused ? '#f59e0b' : '#6b7280';
+            btnElement.classList.toggle('btn-warning', newIsPaused);
+            btnElement.classList.toggle('btn-secondary', !newIsPaused);
+            btnElement.style.backgroundColor = '';
+            btnElement.disabled = false;
 
-            const card = btnElement.closest('.member-list-card, .card, [class*="member"]');
             if (card) {
-                const statusElement = card.querySelector('[class*="status"], .status-text, .badge');
+                if (data.remaining_seconds !== undefined) {
+                    updateRemainingTimeBadge(card, data.remaining_seconds, newIsPaused);
+                }
+                const statusElement = card.querySelector(`#status-text-${CSS.escape(btnElement.getAttribute('data-member-id') || '')}`);
                 if (statusElement) {
-                    if (newIsPaused) {
-                        statusElement.textContent = 'Status: Paused';
-                        statusElement.className = 'badge bg-warning text-dark';
-                    } else {
-                        statusElement.textContent = 'Status: Checked In';
-                        statusElement.className = 'badge bg-success';
-                    }
+                    statusElement.textContent = newIsPaused ? 'Paused' : 'Checked In';
+                    statusElement.classList.toggle('status-paused', newIsPaused);
+                    statusElement.classList.toggle('status-checkin', !newIsPaused);
+                }
+
+                const logContainer = card.querySelector('.member-activity-logs');
+                if (logContainer) {
+                    const logRow = document.createElement('div');
+                    logRow.className = 'member-activity-log';
+
+                    const event = document.createElement('div');
+                    event.className = 'member-activity-log-event';
+                    const logEntry = data.log_entry || data.new_log || {};
+                    event.textContent = logEntry.action || (newIsPaused ? 'Paused' : 'Resumed');
+                    event.style.color = newIsPaused ? '#d69e2e' : '#38a169';
+
+                    const timestamp = document.createElement('div');
+                    timestamp.className = 'member-activity-log-time';
+                    timestamp.textContent = new Intl.DateTimeFormat('en-US', {
+                        timeZone: 'Asia/Manila',
+                        month: 'short',
+                        day: '2-digit',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: true
+                    }).format(new Date()).replace(',', ' -');
+                    timestamp.textContent = logEntry.timestamp || timestamp.textContent;
+
+                    const details = document.createElement('div');
+                    details.className = 'member-activity-log-details';
+                    details.textContent = logEntry.description || (newIsPaused ? 'Session paused' : 'Session resumed');
+
+                    logRow.append(event, timestamp, details);
+                    logContainer.prepend(logRow);
+
                 }
             }
 
             showAlert(data.message || `Session ${newIsPaused ? 'paused' : 'resumed'} successfully.`, 'success');
-            
-            
-            // 3. Smooth Refresh to sync back state from Python backend
-            setTimeout(() => {
-                const currentUrl = new URL(window.location.href);
-                currentUrl.searchParams.set('tab', 'member_list');
-                window.location.href = currentUrl.toString();
-            }, 600);
+            await refreshMemberActivityLogs(membershipId, card);
         } else {
             showAlert(data.message || 'Failed to update session.', 'error');
             btnElement.disabled = false;

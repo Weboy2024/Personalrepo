@@ -30,88 +30,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (membershipId) {
             localStorage.setItem(`membership_expiry_${membershipId}`, expiryISO);
         }
-
-        let countdownInterval = null;
-
-        const updateCountdown = () => {
-            // Dynamic & Strict Boolean Reading
-            const rawCheckedIn = (countdownEl.getAttribute('data-is-checked-in') || '').toString().toLowerCase().trim();
-            const isCheckedIn = (rawCheckedIn === 'true' || rawCheckedIn === '1');
-
-            const timerContainer = document.getElementById('sessionTimerContainer');
-            const parentPausedAttr = timerContainer ? timerContainer.getAttribute('data-is-paused') : null;
-
-            const rawPaused = (countdownEl.getAttribute('data-is-paused') || parentPausedAttr || '').toString().toLowerCase().trim();
-            const isPaused = (rawPaused === 'true' || rawPaused === '1');
-
-            if (isPaused) {
-                countdownEl.textContent = '⏸ PAUSED';
-                countdownEl.style.color = '#f59e0b';
-                return;
-            }
-
-            if (!isCheckedIn) {
-                countdownEl.textContent = 'Not Checked In';
-                countdownEl.style.color = '#6c757d';
-                countdownEl.setAttribute('data-remaining-seconds', '0');
-
-                if (typeof checkExpiringSessionNotification === 'function') {
-                    checkExpiringSessionNotification();
-                }
-                return; 
-            }
-
-            const now = Date.now();
-            const expiryTime = new Date(expiryISO).getTime();
-
-            if (isNaN(expiryTime)) {
-                countdownEl.textContent = 'N/A';
-                return;
-            }
-
-            const distance = expiryTime - now;
-            
-            if (distance <= 0) {
-                countdownEl.textContent = 'Expired';
-                countdownEl.style.color = '#dc3545';
-                countdownEl.setAttribute('data-remaining-seconds', '0');
-                if (countdownInterval) clearInterval(countdownInterval);
-
-                if (typeof checkExpiringSessionNotification === 'function') {
-                    checkExpiringSessionNotification();
-                }
-                return;
-            }
-            
-            const totalRemainingSeconds = Math.floor(distance / 1000);
-            countdownEl.setAttribute('data-remaining-seconds', totalRemainingSeconds);
-
-            const days = Math.floor(distance / (1000 * 60 * 60 * 24));
-            const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-            const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-            const seconds = Math.floor((distance % (1000 * 60)) / 1000);
-            
-            let countdownText = '';
-            if (days > 0) countdownText += `${days}d `;
-            countdownText += `${hours.toString().padStart(2, '0')}h ${minutes.toString().padStart(2, '0')}m ${seconds.toString().padStart(2, '0')}s`;
-            
-            countdownEl.textContent = countdownText;
-            
-            if (distance < 86400000) {
-                countdownEl.style.color = '#dc3545';
-            } else if (distance < 604800000) {
-                countdownEl.style.color = '#ff6c00';
-            } else {
-                countdownEl.style.color = '#28a745';
-            }
-
-            if (typeof checkExpiringSessionNotification === 'function') {
-                checkExpiringSessionNotification();
-            }
-        };
-
-        updateCountdown();
-        countdownInterval = setInterval(updateCountdown, 1000);
+        countdownEl.setAttribute('data-remaining-source', 'session-timer');
     }
 
     // Automatic Run
@@ -431,6 +350,14 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 remainingHoursEl.textContent = formattedRemainingStr;
             }
+
+            const countdownEl = document.getElementById('membershipExpiryCountdown');
+            if (countdownEl) {
+                countdownEl.textContent = formattedRemainingStr;
+                countdownEl.setAttribute('data-remaining-seconds', Math.floor(remainingSec).toString());
+                countdownEl.style.color = '#e53e3e';
+                countdownEl.style.fontWeight = 'bold';
+            }
         }
     }
 
@@ -478,6 +405,30 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (statusData.status !== 'success') return;
 
+            const dashboardStatus = (statusData.member_status || '').toUpperCase();
+            const statusDetail = Array.from(document.querySelectorAll('#membershipCard .detail-item'))
+                .find((item) => item.querySelector('label')?.textContent.trim().toLowerCase() === 'status');
+            const detailStatusBadge = statusDetail?.querySelector('.badge');
+            if (detailStatusBadge) {
+                if (dashboardStatus === 'PAUSED' || statusData.is_paused) {
+                    detailStatusBadge.className = 'badge bg-warning text-dark';
+                    detailStatusBadge.textContent = '⏸ Session Paused';
+                } else if (statusData.is_checked_in) {
+                    detailStatusBadge.className = 'badge bg-success';
+                    detailStatusBadge.textContent = '✓ Checked In';
+                } else {
+                    detailStatusBadge.className = 'badge bg-secondary';
+                    detailStatusBadge.textContent = 'Not Checked In';
+                }
+            }
+
+            const membershipBadge = document.querySelector('#membershipCard .membership-badge');
+            if (membershipBadge) {
+                membershipBadge.classList.toggle('active', Boolean(statusData.is_checked_in));
+                membershipBadge.classList.toggle('expired', !statusData.is_checked_in);
+                membershipBadge.textContent = statusData.is_checked_in ? 'ACTIVE' : 'INACTIVE';
+            }
+
             // Update Badge Status sa Screen
             const statusBadge = document.querySelector('.detail-value .badge, .status-badge');
             if (statusBadge) {
@@ -499,13 +450,16 @@ document.addEventListener('DOMContentLoaded', function() {
             const countdownEl = document.getElementById('membershipExpiryCountdown');
             if (countdownEl) {
                 countdownEl.setAttribute('data-is-checked-in', statusData.is_checked_in ? 'true' : 'false');
-                countdownEl.setAttribute('data-is-paused', statusData.is_paused ? 'true' : 'false');
+                const isPaused = statusData.member_status === 'PAUSED' || statusData.is_paused;
+                countdownEl.setAttribute('data-is-paused', isPaused ? 'true' : 'false');
+                countdownEl.setAttribute('data-member-status', statusData.member_status || '');
             }
 
             // Sync Session Timer Attributes
             const timerContainer = document.getElementById('sessionTimerContainer');
             if (timerContainer) {
-                timerContainer.setAttribute('data-is-paused', statusData.is_paused ? 'true' : 'false');
+                const isPaused = statusData.member_status === 'PAUSED' || statusData.is_paused;
+                timerContainer.setAttribute('data-is-paused', isPaused ? 'true' : 'false');
             }
 
             // 2. Fetch Active Session Elapsed Time
@@ -538,6 +492,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             } else {
                 // Kon wala nakacheck-in, reset attributes & DOM displays
+                if (sessionIntervalId) {
+                    clearInterval(sessionIntervalId);
+                    sessionIntervalId = null;
+                }
                 if (timerContainer) {
                     timerContainer.setAttribute('data-is-paused', 'false');
                     timerContainer.removeAttribute('data-checkin-time');
@@ -547,6 +505,19 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 const sessionTimer = document.getElementById('sessionTimer') || document.getElementById('session_duration_display');
                 if (sessionTimer) sessionTimer.textContent = '00:00:00';
+
+                const countdownEl = document.getElementById('membershipExpiryCountdown');
+                if (countdownEl) {
+                    countdownEl.textContent = '--:--:--';
+                    countdownEl.setAttribute('data-remaining-seconds', '0');
+                    countdownEl.style.color = '#718096';
+                }
+
+                const remainingHoursEl = document.getElementById('remainingHours');
+                if (remainingHoursEl) {
+                    const hoursValue = remainingHoursEl.querySelector('.hours-value');
+                    if (hoursValue) hoursValue.textContent = '0h 0m 0s';
+                }
 
                 const hoursSpent = document.getElementById('hoursSpent');
                 if (hoursSpent) hoursSpent.textContent = '0h 0m';

@@ -132,128 +132,93 @@
                 {% for member in members %}
                     {% if member.membership and member.membership.status == 'active' %}
                         {% set ns.count = ns.count + 1 %}
-                        <div class="member-list-card" data-searchable="{{ member.name }} {{ member.email }} WS-WLK-{{ member.id }}">
-                            <div class="member-status-icon">
-                                <div class="status-indicator-box active">
-                                    <i class="fas fa-file-invoice"></i>
-                                    <span>Active</span>
+                        <div class="member-list-card" data-searchable="{{ member.name }} {{ member.email }} WS-WLK-{{ member.id }}" data-user-id="{{ member.id }}" data-membership-id="{{ member.membership.id if member.membership else member.id }}">
+                            {% set is_checked_in_val = member.membership and member.membership.is_checked_in %}
+                            {% set raw_paused = (member.membership and member.membership.is_paused) or (member.is_paused if member.is_paused is defined else False) %}
+                            {% set is_paused_val = is_checked_in_val and raw_paused %}
+                            {% set visit_count = member.membership.attendance_logs.count() if member.membership else 0 %}
+                            <div class="member-card-header">
+                                <div class="member-header-info">
+                                    <h3 class="member-name">{{ member.name }}</h3>
+                                    <div class="member-sub-info">
+                                        <span>WS-WLK-{{ member.id }}</span>
+                                        <div class="member-contact-stack">
+                                            <span>Email: {{ member.email }}</span>
+                                            <span>Contact: {{ member.phone or 'N/A' }}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="member-header-plan">
+                                    <span>Plan: {{ member.membership.plan_name if member.membership else 'Solo Plan' }}</span>
+                                    <span>Status:
+                                        {% if is_paused_val %}
+                                            <strong id="status-text-{{ member.id }}" class="status-paused">Paused</strong>
+                                        {% elif is_checked_in_val %}
+                                            <strong id="status-text-{{ member.id }}" class="status-checkin">Checked In</strong>
+                                        {% elif member.membership and member.membership.is_checked_out %}
+                                            <strong id="status-text-{{ member.id }}">Checked Out</strong>
+                                        {% else %}
+                                            <strong id="status-text-{{ member.id }}">Ready to check in</strong>
+                                        {% endif %}
+                                    </span>
+                                </div>
+                                <div class="remaining-time-badge">
+                                    <span>Remaining Time</span>
+                                    <strong>{{ '%.2f'|format(member.membership.hours_left or 0) }} hrs</strong>
                                 </div>
                             </div>
-                            
-                            <div class="member-main-info">
-                                <h3 class="member-name">{{ member.name }}</h3>
-                                <p class="member-id-tag">WS-WLK-{{ member.id }}</p>
-                                <p class="detail-text">Email: {{ member.email }}</p>
-                                <p class="detail-text">Contact: {{ member.phone or 'N/A' }}</p>
-                            </div>
-                            
-                            <div class="member-plan-summary">
-                                <p class="detail-text">Plan: {{ member.membership.plan_name if member.membership else 'Solo Plan' }}</p>
-                                <p class="detail-text">
-                                    Status: 
-                                    {% set is_checked_in_val = member.membership and member.membership.is_checked_in %}
-                                    {% set raw_paused = (member.membership and member.membership.is_paused) or (member.is_paused if member.is_paused is defined else False) %}
-
-                                    {# FIX: Mag-Paused LANG sya kon NAKA-CHECK IN gid ang member #}
-                                    {% set is_paused_val = is_checked_in_val and raw_paused %}
-
-                                    {% if is_paused_val %}
-                                        <span id="status-text-{{ member.id }}" style="color: #f59e0b; font-weight: bold;">Paused</span>
-                                    {% elif is_checked_in_val %}
-                                        <span id="status-text-{{ member.id }}" style="color: #28a745; font-weight: bold;">Checked In</span>
-                                    {% elif member.membership and member.membership.is_checked_out %}
-                                        <span id="status-text-{{ member.id }}" style="color: #6c757d; font-weight: bold;">Checked Out</span>
-                                    {% else %}
-                                        <span id="status-text-{{ member.id }}">Ready to check in</span>
-                                    {% endif %}
-                                </p>
-                            </div>
-
-                            <!-- ACTION BUTTONS CONTAINER -->
-                            <div class="member-card-actions" style="display: flex; flex-direction: column; gap: 8px;">
-                                <div class="session-action-group" style="display: flex; flex-direction: column; gap: 6px; width: 100%;">
-                                    
-                                    {% if member.membership and member.membership.is_checked_in %}
-                                        <!-- STATE 1: CURRENTLY CHECKED IN -->
-                                        <button class="btn-check-in disabled-btn" type="button" disabled style="background-color: #10b981; color: #ffffff; opacity: 0.65; cursor: not-allowed; width: 100%;">
-                                            Checked In
-                                        </button>
-
-                                        {% set member_membership_id = member.membership.id if (member.membership and member.membership.id) else member.id %}
-                                        {% set member_name_val = member.name if member.name is defined else (member.user.name if member.user is defined else 'Member') %}
-
-                                        {% set member_membership_id = member.membership.id if (member.membership and member.membership.id) else member.id %}
-                                        {% set member_name_val = member.name if member.name is defined else (member.user.name if member.user is defined else 'Member') %}
-
-                                        <button type="button" 
-                                                id="pause-btn-{{ member_membership_id }}"
-                                                class="btn-pause-session {% if is_paused_val %}btn-warning{% else %}btn-secondary{% endif %}" 
-                                                data-membership-id="{{ member_membership_id }}" 
-                                                data-member-id="{{ member.id }}"
-                                                data-is-paused="{{ 'true' if is_paused_val else 'false' }}"
-                                                data-member-name="{{ member_name_val }}"
-                                                onclick="handlePauseClick(this)">
-                                            {% if is_paused_val %}
-                                                Resume Session
-                                            {% else %}
-                                                Pause Session
-                                            {% endif %}
-                                        </button>
-
-                                        <button type="button" 
-                                                class="btn-deactivate" 
-                                                style="width: 100%; background-color: #dc3545; color: white;" 
-                                                onclick="handleCheckout('{{ member.id }}')">
-                                            Check-Out Customer
-                                        </button>
-
-                                    {% elif member.membership and member.membership.is_checked_out and not (member.id in approved_solo_user_ids) %}
-                                        <!-- STATE 2: CHECKED OUT & WALA NA SANG ACTIVE/NEW SOLO PLAN -->
-                                        <button type="button" class="btn-deactivate" style="width: 100%; opacity: 0.65; cursor: not-allowed; background-color: #dc3545; color: white;" disabled>
-                                            Checked Out
-                                        </button>
-
-                                    {% else %}
-                                        <!-- STATE 3: HAS ACTIVE / NEW SOLO PLAN -> ALWAYS SHOW CHECK IN -->
-                                        <button class="btn-check-in btn-action" 
-                                                type="button" 
-                                                data-user-id="{{ member.id }}" 
-                                                data-membership-id="{{ member.membership.id if member.membership else member.id }}" 
-                                                data-is-checked-in="false" 
-                                                style="width: 100%; background-color: #10b981; color: #ffffff; cursor: pointer;">
-                                            Check In
-                                        </button>
-                                    {% endif %}
+                            <div class="member-card-left-column">
+                                <div class="member-status-icon">
+                                    <div class="status-indicator-box active">
+                                        <i class="fas fa-file-invoice"></i>
+                                        <span>Active</span>
+                                    </div>
                                 </div>
+                                <div class="member-card-actions">
+                                    <div class="session-action-group">
+                                        {% if member.membership and member.membership.is_checked_in %}
+                                            <!-- STATE 1: CURRENTLY CHECKED IN -->
+                                            <button class="btn-check-in disabled-btn" type="button" disabled style="background-color: #10b981; color: #ffffff; opacity: 0.65; cursor: not-allowed; width: 100%;">
+                                                Checked In
+                                            </button>
 
-                                <!-- VIEW RECORDS BUTTON -->
-                                <button
-                                    class="btn-view-records"
-                                    type="button"
-                                    data-user-id="{{ member.id }}"
-                                    data-membership-id="{{ member.membership.id if member.membership else '' }}"
-                                >
-                                    View Records
-                                </button>
+                                            {% set member_membership_id = member.membership.id if (member.membership and member.membership.id) else member.id %}
+                                            {% set member_name_val = member.name if member.name is defined else (member.user.name if member.user is defined else 'Member') %}
 
-                                <div class="manage-action-group" style="display: flex; flex-direction: column; gap: 6px; width: 100%;">
+                                            <button type="button" id="pause-btn-{{ member_membership_id }}" class="btn-pause-session {% if is_paused_val %}btn-warning{% else %}btn-secondary{% endif %}" data-membership-id="{{ member_membership_id }}" data-member-id="{{ member.id }}" data-is-paused="{{ 'true' if is_paused_val else 'false' }}" data-member-name="{{ member_name_val }}" onclick="handlePauseClick(this)">
+                                                {% if is_paused_val %}Resume Session{% else %}Pause Session{% endif %}
+                                            </button>
+
+                                            <button type="button" class="btn-deactivate" style="width: 100%; background-color: #dc3545; color: white;" onclick="handleCheckout('{{ member.id }}')">Check-Out Customer</button>
+
+                                        {% elif member.membership and member.membership.is_checked_out and not (member.id in approved_solo_user_ids) %}
+                                            <button type="button" class="btn-deactivate" style="width: 100%; opacity: 0.65; cursor: not-allowed; background-color: #dc3545; color: white;" disabled>Checked Out</button>
+                                        {% else %}
+                                            <button class="btn-check-in btn-action" type="button" data-user-id="{{ member.id }}" data-membership-id="{{ member.membership.id if member.membership else member.id }}" data-is-checked-in="false" style="width: 100%; background-color: #10b981; color: #ffffff; cursor: pointer;">Check In</button>
+                                        {% endif %}
+                                    </div>
+
+                                    <button class="btn-view-records" type="button" data-user-id="{{ member.id }}" data-membership-id="{{ member.membership.id if member.membership else '' }}">View Records</button>
+
+                                    <div class="manage-action-group">
                                     {% if member.membership and member.membership.is_checked_in %}
-                                        <!-- KON CHECKED IN: Faded & Disabled Button -->
-                                        <button type="button" class="btn renew-btn" style="width: 170%; font-weight: bold; background-color: #153d70; color: white; opacity: 0.65; cursor: not-allowed;" disabled>
-                                            Renew Membership
-                                        </button>
+                                        <button type="button" class="btn renew-btn" style="font-weight: bold; background-color: #153d70; color: white; opacity: 0.65; cursor: not-allowed;" disabled>Renew Membership</button>
                                     {% else %}
-                                        <!-- KON CHECKED OUT (o INDI CHECKED IN): Clickable Button -->
-                                        <button class="btn renew-btn btn-action" 
-                                                type="button" 
-                                                onclick="renewMember('{{ member.id }}')"
-                                                data-user-id="{{ member.id }}"
-                                                style="width: 170%; font-weight: bold; background-color: #153d70; color: white; cursor: pointer;">
-                                            Renew Membership
-                                        </button>
+                                        <button class="btn renew-btn btn-action" type="button" onclick="renewMember('{{ member.id }}')" data-user-id="{{ member.id }}" style="font-weight: bold; background-color: #153d70; color: white; cursor: pointer;">Renew Membership</button>
                                     {% endif %}
 
                                     <button class="btn-deactivate" type="button" data-user-id="{{ member.id }}">Deactivate</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="member-activity-logs-container" aria-label="Recent activity">
+                                <div class="member-activity-logs-header">
+                                    <span>SESSION ACTIVITY</span>
+                                    <span class="member-activity-logs-count">Daily session history {{ visit_count }} visits</span>
+                                </div>
+                                <div class="member-activity-logs" data-activity-membership-id="{{ member.membership.id if member.membership else member.id }}">
+                                    <p class="member-activity-log-empty">Loading activity...</p>
                                 </div>
                             </div>
                         </div> <!-- End of .member-list-card -->
@@ -400,7 +365,9 @@
                             timer: 1500,
                             showConfirmButton: false
                         }).then(() => {
-                            location.reload();
+                            if (typeof window.refreshMemberActivityLogs === 'function') {
+                                window.refreshMemberActivityLogs(userId);
+                            }
                         });
                     } else {
                         Swal.fire('Error!', data.message, 'error');

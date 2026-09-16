@@ -141,7 +141,7 @@ function showToast(message, icon = 'info', timer = 5000) {
 }
 
 function fetchSidebarNotifications() {
-    fetch('/api/admin/notifications-count')
+    fetch('/admin/api/admin/notifications-count')
         .then(response => {
             if (!response.ok) return null;
             return response.json();
@@ -149,14 +149,22 @@ function fetchSidebarNotifications() {
         .then(data => {
             if (!data) return;
 
+            const dismissedCount = Number(sessionStorage.getItem('members_sidebar_badge_count') || 0);
+
             // Helper function para sa pag-update sang badge display
             const updateBadge = (elementId, count) => {
                 const badge = document.getElementById(elementId);
                 if (badge) {
-                    if (count > 0) {
-                        badge.innerText = count;
+                    const visibleCount = elementId === 'mem-notif-badge'
+                        ? Math.max(0, count - dismissedCount)
+                        : count;
+                    if (visibleCount > 0) {
+                        badge.innerText = visibleCount;
+                        badge.style.display = 'inline-flex';
                         badge.classList.remove('d-none');
                     } else {
+                        badge.innerText = '0';
+                        badge.style.display = 'none';
                         badge.classList.add('d-none');
                     }
                 }
@@ -165,17 +173,36 @@ function fetchSidebarNotifications() {
             // Update individual counts
             updateBadge('total-notif-badge', data.total_notifications);
             updateBadge('res-notif-badge', data.pending_reservations);
-            updateBadge('mem-notif-badge', data.pending_memberships);
+            updateBadge('mem-notif-badge', data.members_notifications);
         })
         .catch(error => console.error("Error updating notification badges:", error));
 }
 
-// I-run sa pag-load sang page kag mag-repeat kada 10 ka segundo
+    // Poll admin notification badges every 3 seconds.
 document.addEventListener('DOMContentLoaded', function() {
+    const membersNavLink = document.querySelector('a[href*="/admin/members"]');
+    if (membersNavLink) {
+        membersNavLink.addEventListener('click', () => {
+            const badge = document.getElementById('mem-notif-badge');
+            if (badge) {
+                const currentCount = Number(badge.textContent || 0);
+                badge.textContent = '0';
+                badge.style.display = 'none';
+                badge.classList.add('d-none');
+                sessionStorage.setItem('members_sidebar_badge_count', String(currentCount));
+            }
+            fetch('/admin/api/admin/notifications/clear-nav', {
+                method: 'POST',
+                keepalive: true,
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            }).catch(() => {});
+        });
+    }
+
     // Check lang kon ara sa admin/staff view (kun may badge element)
     if (document.getElementById('total-notif-badge')) {
-        // Polling interval (10000ms = 10s)
-        setInterval(fetchSidebarNotifications, 10000);
+        fetchSidebarNotifications();
+        setInterval(fetchSidebarNotifications, 3000);
     }
 });
 
