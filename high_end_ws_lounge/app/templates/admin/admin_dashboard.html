@@ -79,32 +79,8 @@
                 </div>
             </div>
 
-            <div class="room-grid common-area-grid">
-                <div class="room-card dashboard-card common-area-summary" data-room="common area">
-                    <div class="room-card-header">
-                        <span class="room-name">Common Area</span>
-                        <span class="status-pill {{ 'occupied' if common_area_available_slots == 0 or common_area_occupancy > 0 else 'available' }}">
-                            {{ 'Full' if common_area_available_slots == 0 else ('Occupied' if common_area_occupancy > 0 else 'Available') }}
-                        </span>
-                    </div>
-                    <div class="room-card-body">
-                        <div class="info-row">
-                            <span class="info-label">Occupied</span>
-                            <span class="info-value">{{ common_area_occupancy }}</span>
-                        </div>
-                        <div class="info-row">
-                            <span class="info-label">Available Slots</span>
-                            <span class="info-value">{{ common_area_available_slots }}</span>
-                        </div>
-                        {% if common_area_occupancy == 0 %}
-                        <div class="info-row name-row">
-                            <span class="info-label">Info:</span>
-                            <span class="info-value">No active Common Area sessions</span>
-                        </div>
-                        {% endif %}
-                    </div>
-                </div>
-
+            <div id="common-area-active-cards-scroll" class="common-area-active-cards-scroll mb-4 pb-2" style="max-height: 340px;">
+                <div class="room-grid common-area-grid">
                 {% if common_area_reservations %}
                     {% for res in common_area_reservations %}
                     {% set is_expired = false %}
@@ -241,6 +217,7 @@
                     </div>
                     {% endfor %}
                 {% endif %}
+                </div>
             </div>
 
             <div class="room-grid" id="roomGridContainer">
@@ -409,10 +386,11 @@
             <div class="waiting-list-card">
                 <div class="waiting-header">
                     <h3>Waiting List - Today</h3>
+                    <span class="waiting-count" id="waiting-list-count-badge">{{ pending_reservations|length }}</span>
                     <img src="https://img.icons8.com/ios/50/64748b/calendar.png" alt="calendar-icon" class="mini-calendar">
                 </div>
                 
-                <div class="waiting-items">
+                <div class="waiting-items" id="today-waiting-list-container">
                     {% for res in pending_reservations %}
                     <div class="waiting-item">
                         <p class="waiting-name">Next: {{ res.customer_name }}</p>

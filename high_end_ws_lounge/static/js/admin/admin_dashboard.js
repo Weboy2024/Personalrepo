@@ -104,6 +104,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
 
+            const endRow = Array.from(card?.querySelectorAll('.info-row') || [])
+                .find(row => row.querySelector('.info-label')?.textContent.trim().toLowerCase() === 'end');
+            const endValue = endRow?.querySelector('.info-value');
+            if (endValue && endTime) {
+                endValue.textContent = endTime.toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: true
+                });
+            }
+
             // Stop Live Timer when session has ended
             if (!isOpenTime && endTime && now >= endTime) {
                 timer.textContent = '(EXPIRED)';
@@ -135,9 +146,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     freezeEndTime = parseIsoDate(pausedAtStr) || now;
                 }
 
-                const pausedElapsed = isOpenTime 
-                    ? Math.max(0, Math.floor((freezeEndTime - startTime) / 1000) - clockOffset - accumPausedSecs)
-                    : Math.max(0, Math.floor((freezeEndTime - startTime) / 1000) - clockOffset);
+                const pausedElapsed = Math.max(
+                    0,
+                    Math.floor((freezeEndTime - startTime) / 1000) - clockOffset - accumPausedSecs
+                );
 
                 timer.textContent = `${formatTime(pausedElapsed)} ⏸ (PAUSED)`;
 
@@ -153,15 +165,8 @@ document.addEventListener('DOMContentLoaded', function() {
             // ==========================================
             const rawElapsed = Math.floor((now - startTime) / 1000) - clockOffset;
             
-            if (isOpenTime) {
-                // [BAG-O FOR OPEN TIME]: 
-                // I-subtract ang accumulated_paused_seconds nga halin sa database
-                const actualOpenElapsed = Math.max(0, rawElapsed - accumPausedSecs);
-                timer.textContent = formatTime(actualOpenElapsed);
-            } else {
-                // KON FIXED TIME: Standard running duration
-                timer.textContent = formatTime(Math.max(0, rawElapsed));
-            }
+            // Both session types display active elapsed time, excluding prior pauses.
+            timer.textContent = formatTime(Math.max(0, rawElapsed - accumPausedSecs));
 
             // Active remaining time (Para sa Fixed Time)
             if (remainingElem && endTime) {
@@ -246,6 +251,19 @@ document.addEventListener('DOMContentLoaded', function() {
             cards.forEach(card => grid.appendChild(card));
         });
     }
+
+    function standardizeRoomGridColumns() {
+        const columns = window.innerWidth >= 768
+            ? 'repeat(2, minmax(0, 1fr))'
+            : '1fr';
+
+        document.querySelectorAll('.common-area-grid, #roomGridContainer').forEach(grid => {
+            grid.style.gridTemplateColumns = columns;
+        });
+    }
+
+    standardizeRoomGridColumns();
+    window.addEventListener('resize', standardizeRoomGridColumns);
 
     function updateClock() {
         const clockEl = document.getElementById('dashboardClock');
@@ -439,8 +457,102 @@ function fetchCommonAreaOccupants() {
         });
 }
 
+function loadTodayWaitingList() {
+    fetch('/admin/api/dashboard/today-waiting-list')
+        .then(response => response.json())
+        .then(data => {
+            const container = document.getElementById('today-waiting-list-container');
+            const countBadge = document.getElementById('waiting-list-count-badge');
+            if (!container) return;
+            if (countBadge) countBadge.textContent = data.count || 0;
+
+            if (!Array.isArray(data.waiting_list) || data.waiting_list.length === 0) {
+                container.innerHTML = '<p class="no-data">No upcoming reservations.</p>';
+                return;
+            }
+
+            container.innerHTML = data.waiting_list.map(item => `
+                <div class="waiting-item">
+                    <p class="waiting-name">Next: ${item.customer_name}</p>
+                    <p class="waiting-details">(${item.room_name}, ${item.start_time} - ${item.end_time})</p>
+                    <span class="waiting-status">${item.status}</span>
+                </div>
+            `).join('');
+        })
+        .catch(err => console.error("Failed to load today's waiting list", err));
+}
+
+function updateCommonAreaCardStats(data) {
+    const commonArea = data && data.common_area ? data.common_area : data;
+    if (!commonArea) return;
+
+    const occupied = commonArea.occupied;
+    const available = commonArea.available;
+
+    const summaryItems = document.querySelectorAll('.occupancy-summary-section .summary-item');
+    summaryItems.forEach(item => {
+        const label = item.querySelector('.summary-label')?.textContent.toLowerCase() || '';
+        const value = item.querySelector('.summary-value');
+        if (!value) return;
+        if (label.includes('occupied')) value.textContent = occupied;
+        if (label.includes('available')) value.textContent = available;
+    });
+
+}
+
+function updateRoomStatusCards(data) {
+    if (!Array.isArray(data?.rooms)) return;
+
+    data.rooms.forEach(room => {
+        const card = Array.from(document.querySelectorAll('#roomGridContainer .room-card'))
+            .find(candidate => candidate.dataset.room === room.name.trim().toLowerCase());
+        if (!card) return;
+
+        const occupied = room.status === 'OCCUPIED';
+        const statusPill = card.querySelector('.status-pill');
+        const statusText = card.querySelector('.status-text');
+        const nameValue = card.querySelector('.name-row .info-value');
+        const startValue = Array.from(card.querySelectorAll('.info-row'))
+            .find(row => row.querySelector('.info-label')?.textContent.trim().toLowerCase() === 'start')
+            ?.querySelector('.info-value');
+        const endValue = Array.from(card.querySelectorAll('.info-row'))
+            .find(row => row.querySelector('.info-label')?.textContent.trim().toLowerCase() === 'end')
+            ?.querySelector('.info-value');
+
+        card.dataset.customer = (room.occupant_name || '').toLowerCase();
+        card.dataset.endtime = room.end_time || '';
+        if (statusPill) {
+            statusPill.textContent = occupied ? 'Occupied' : 'Available';
+            statusPill.classList.toggle('occupied', occupied);
+            statusPill.classList.toggle('available', !occupied);
+        }
+        if (statusText) {
+            statusText.textContent = occupied ? 'Occupied' : 'Available';
+            statusText.classList.toggle('occupied', occupied);
+            statusText.classList.toggle('available', !occupied);
+        }
+        if (nameValue) nameValue.textContent = room.occupant_name || '---';
+        if (startValue) startValue.textContent = room.start_time ? new Date(room.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true }) : '---';
+        if (endValue) endValue.textContent = room.end_time ? new Date(room.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true }) : '---';
+    });
+}
+
+function fetchCommonAreaCardStats() {
+    fetch('/admin/api/dashboard/room-status')
+        .then(response => response.json())
+        .then(data => {
+            updateCommonAreaCardStats(data);
+            updateRoomStatusCards(data);
+        })
+        .catch(err => console.error('Failed to load common area room status', err));
+}
+
 fetchCommonAreaOccupants();
+loadTodayWaitingList();
+fetchCommonAreaCardStats();
 setInterval(fetchCommonAreaOccupants, 10000);
+setInterval(loadTodayWaitingList, 5000);
+setInterval(fetchCommonAreaCardStats, 10000);
 setInterval(updateOccupantTimers, 1000);
 
 // End Session Button Logic
@@ -649,8 +761,14 @@ window.handleCheckout = function(resId) {
 
                     const card = document.querySelector(`.add-time-btn[data-reservation-id="${activeExtendReservation.resId}"]`)?.closest('.room-card');
                     if (card) {
-                        card.dataset.endtime = data.new_end_time || card.dataset.endtime;
+                        const newEndTime = data.new_end_time || card.dataset.endtime;
+                        card.dataset.endtime = newEndTime;
                         card.classList.remove('session-expired');
+
+                        card.querySelectorAll('.timer-text').forEach(timer => {
+                            timer.setAttribute('data-endtime', newEndTime);
+                        });
+
                         const endRow = Array.from(card.querySelectorAll('.info-row')).find(row => {
                             const label = row.querySelector('.info-label');
                             return label && label.textContent.trim() === 'End';
@@ -671,6 +789,8 @@ window.handleCheckout = function(resId) {
                                 el.dataset.extraFee = data.new_extra_fee;
                             }
                         });
+
+                        updateTimers();
                     }
 
                     showToast(data.message, 'success');

@@ -4,6 +4,45 @@ document.addEventListener('DOMContentLoaded', function() {
     const modal = document.getElementById('walkinModal');
     const walkinForm = document.getElementById('walkinForm');
 
+    function showWalkinConflict(message) {
+        let alertBox = document.getElementById('walkin-conflict-alert');
+        if (!alertBox && modal) {
+            alertBox = document.createElement('div');
+            alertBox.id = 'walkin-conflict-alert';
+            alertBox.className = 'alert alert-danger d-none';
+            alertBox.setAttribute('role', 'alert');
+            walkinForm?.prepend(alertBox);
+        }
+        if (alertBox) {
+            alertBox.textContent = message || 'Time Conflict detected.';
+            alertBox.classList.remove('d-none');
+        } else {
+            alert(message || 'Time Conflict detected.');
+        }
+    }
+
+    if (walkinForm) {
+        walkinForm.addEventListener('submit', async function(event) {
+            event.preventDefault();
+            try {
+                const response = await fetch(walkinForm.action, {
+                    method: 'POST',
+                    body: new FormData(walkinForm),
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                });
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    showWalkinConflict(result.message);
+                    return;
+                }
+                location.reload();
+            } catch (error) {
+                console.error('Walk-in error:', error);
+                showWalkinConflict('Unable to check in the walk-in. Please try again.');
+            }
+        });
+    }
+
     if (openBtn && modal) {
         openBtn.addEventListener('click', function() {
             modal.classList.add('active');
@@ -424,14 +463,14 @@ updateWalkinPreview();
                     }
                 }).then(result => {
                     if (result.isConfirmed) {
-                        walkinForm.submit();
+                        walkinForm.requestSubmit();
                     }
                 });
             } else if (typeof confirmAction === 'function') {
                 confirmAction(confirmationTitle, confirmationText, 'Yes, Check In!', 'Cancel')
-                    .then(confirmed => { if (confirmed) walkinForm.submit(); });
+                    .then(confirmed => { if (confirmed) walkinForm.requestSubmit(); });
             } else {
-                walkinForm.submit();
+                walkinForm.requestSubmit();
             }
         });
     }

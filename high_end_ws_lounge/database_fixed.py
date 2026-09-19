@@ -89,15 +89,14 @@ class Config:
     SQLALCHEMY_DATABASE_URI = resolve_database_uri()
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-    # EMAIL CONFIGURATION (With Fallbacks to prevent None values)
-    MAIL_SERVER = os.environ.get("MAIL_SERVER") or "smtp.gmail.com"
-    MAIL_PORT = int(os.environ.get("MAIL_PORT") or 587)
-    MAIL_USE_TLS = os.environ.get("MAIL_USE_TLS", "true").lower() == "true"
+    # EMAIL CONFIGURATION
+    MAIL_SERVER = os.environ.get("MAIL_SERVER", "smtp.gmail.com")
+    MAIL_PORT = int(os.environ.get("MAIL_PORT", "587"))
+    MAIL_USE_TLS = os.environ.get("MAIL_USE_TLS", "True").lower() in {"true", "on", "1"}
+    MAIL_USE_SSL = os.environ.get("MAIL_USE_SSL", "False").lower() in {"true", "on", "1"}
     MAIL_USERNAME = os.environ.get("MAIL_USERNAME")
     MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD")
-    
-    # INI ANG WALA KAG KINAHANGLANON GID SANG FLASK-MAIL:
-    MAIL_DEFAULT_SENDER = os.environ.get("MAIL_DEFAULT_SENDER") or os.environ.get("MAIL_USERNAME") or "noreply@wslounge.com"
+    MAIL_DEFAULT_SENDER = os.environ.get("MAIL_DEFAULT_SENDER", MAIL_USERNAME)
 
     STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY")
     STRIPE_PUBLIC_KEY = os.environ.get("STRIPE_PUBLIC_KEY")

@@ -149,15 +149,15 @@ function fetchSidebarNotifications() {
         .then(data => {
             if (!data) return;
 
-            const dismissedCount = Number(sessionStorage.getItem('members_sidebar_badge_count') || 0);
+            const isOnMembersPage = window.location.pathname.includes('/admin/members');
 
             // Helper function para sa pag-update sang badge display
             const updateBadge = (elementId, count) => {
                 const badge = document.getElementById(elementId);
                 if (badge) {
-                    const visibleCount = elementId === 'mem-notif-badge'
-                        ? Math.max(0, count - dismissedCount)
-                        : count;
+                    const visibleCount = elementId === 'mem-notif-badge' && isOnMembersPage
+                        ? 0
+                        : Number(count || 0);
                     if (visibleCount > 0) {
                         badge.innerText = visibleCount;
                         badge.style.display = 'inline-flex';
@@ -180,23 +180,28 @@ function fetchSidebarNotifications() {
 
     // Poll admin notification badges every 3 seconds.
 document.addEventListener('DOMContentLoaded', function() {
+    const clearSidebarMembersBadge = () => {
+        const badge = document.getElementById('mem-notif-badge');
+        if (badge) {
+            badge.textContent = '0';
+            badge.style.setProperty('display', 'none', 'important');
+            badge.classList.add('d-none');
+        }
+        fetch('/admin/api/admin/notifications/clear-nav', {
+            method: 'POST',
+            keepalive: true,
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        }).catch(() => {});
+    };
+
     const membersNavLink = document.querySelector('a[href*="/admin/members"]');
+
+    if (window.location.pathname.includes('/admin/members')) {
+        clearSidebarMembersBadge();
+    }
+
     if (membersNavLink) {
-        membersNavLink.addEventListener('click', () => {
-            const badge = document.getElementById('mem-notif-badge');
-            if (badge) {
-                const currentCount = Number(badge.textContent || 0);
-                badge.textContent = '0';
-                badge.style.display = 'none';
-                badge.classList.add('d-none');
-                sessionStorage.setItem('members_sidebar_badge_count', String(currentCount));
-            }
-            fetch('/admin/api/admin/notifications/clear-nav', {
-                method: 'POST',
-                keepalive: true,
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
-            }).catch(() => {});
-        });
+        membersNavLink.addEventListener('click', clearSidebarMembersBadge);
     }
 
     // Check lang kon ara sa admin/staff view (kun may badge element)

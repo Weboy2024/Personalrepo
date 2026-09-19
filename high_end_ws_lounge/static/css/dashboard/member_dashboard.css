@@ -204,6 +204,30 @@ body {
 }
 
 /* Issue #7: Solo Plan Cards Grid */
+.solo-plans-scroll-container {
+    max-height: 420px;
+    overflow-y: auto;
+    padding-right: 6px;
+}
+
+.solo-plans-scroll-container::-webkit-scrollbar {
+    width: 6px;
+}
+
+.solo-plans-scroll-container::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 4px;
+}
+
+.solo-plans-scroll-container::-webkit-scrollbar-thumb {
+    background: #ccc;
+    border-radius: 4px;
+}
+
+.solo-plans-scroll-container::-webkit-scrollbar-thumb:hover {
+    background: #aaaaaa;
+}
+
 .solo-plans-grid {
     display: grid;
     grid-template-columns: 1fr;

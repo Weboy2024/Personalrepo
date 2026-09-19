@@ -62,6 +62,31 @@ document.addEventListener('DOMContentLoaded', function() {
         return null; // Fallback to option text rate
     }
 
+    function updateEndDateTime() {
+        if (!startTime || !durationSelect || !endTime || !endDisplay || openTimeToggle?.checked) {
+            return;
+        }
+
+        if (!startTime.value || !durationSelect.value) return;
+
+        const start = new Date(startTime.value);
+        if (Number.isNaN(start.getTime())) return;
+
+        const end = new Date(start.getTime());
+        end.setTime(end.getTime() + (parseFloat(durationSelect.value) || 1) * 60 * 60 * 1000);
+
+        const year = end.getFullYear();
+        const month = String(end.getMonth() + 1).padStart(2, '0');
+        const day = String(end.getDate()).padStart(2, '0');
+        const hours = String(end.getHours()).padStart(2, '0');
+        const minutes = String(end.getMinutes()).padStart(2, '0');
+        const formattedEnd = `${year}-${month}-${day}T${hours}:${minutes}`;
+
+        endTime.value = formattedEnd;
+        endDisplay.value = formattedEnd;
+        if (previewEnd) previewEnd.innerText = formatDateTime(formattedEnd);
+    }
+
     function updateSummary() {
         if (previewName) previewName.innerText = customerName.value.trim() || '----';
         if (previewContact) previewContact.innerText = contactNumber.value.trim() || '----';
@@ -147,24 +172,9 @@ document.addEventListener('DOMContentLoaded', function() {
             if (previewEnd) previewEnd.innerText = 'OPEN TIME';
             duration = 1;
         } else if (!openTimeToggle?.checked && durationSelect && durationSelect.value && startTime && startTime.value) {
+            updateEndDateTime();
             const start = new Date(startTime.value);
             const addedHours = parseFloat(durationSelect.value) || 1;
-            
-            const end = new Date(start.getTime());
-            end.setHours(end.getHours() + addedHours);
-
-            const year = end.getFullYear();
-            const month = String(end.getMonth() + 1).padStart(2, '0');
-            const day = String(end.getDate()).padStart(2, '0');
-            const hours = String(end.getHours()).padStart(2, '0');
-            const minutes = String(end.getMinutes()).padStart(2, '0');
-            const formattedEnd = `${year}-${month}-${day}T${hours}:${minutes}`;
-
-            if (previewEnd) previewEnd.innerText = formatDateTime(formattedEnd);
-            if (endTime) {
-                endTime.value = formattedEnd;
-                if (endDisplay) endDisplay.value = formattedEnd;
-            }
             duration = addedHours;
         } else if (endTime && endTime.value) {
             if (previewEnd) previewEnd.innerText = formatDateTime(endTime.value);
@@ -275,11 +285,13 @@ document.addEventListener('DOMContentLoaded', function() {
     // Register all event listeners including paxInput
     [customerName, contactNumber, roomId, paxInput, startTime, endTime, durationSelect, extraFeeInput, discountSelect].forEach(el => {
         if (!el) return;
-        const eventType = el.tagName === 'SELECT' ? 'change' : 'input';
-        el.addEventListener(eventType, function() {
+        const updateReservationTime = function() {
+            if (el === startTime || el === durationSelect) updateEndDateTime();
             updateSummary();
             if (el === roomId) updateOpenTimeToggleState();
-        });
+        };
+        el.addEventListener('change', updateReservationTime);
+        el.addEventListener('input', updateReservationTime);
     });
 
     setTimeout(updateOpenTimeToggleState, 100);
@@ -302,6 +314,7 @@ document.addEventListener('DOMContentLoaded', function() {
             .then(response => response.json())
             .then(data => {
                 if (data.status === 'conflict') {
+                    setAvailabilityState(data.message || 'Time conflict detected.', true);
                     Swal.fire({
                         icon: 'error',
                         title: 'Schedule Conflict',
@@ -309,6 +322,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         confirmButtonColor: '#d90429'
                     });
                 } else {
+                    setAvailabilityState('', false);
                     Swal.fire({
                         title: 'Save Reservation?',
                         text: `Confirming reservation for ${customerName.value}. Total: ${previewTotal.innerText}`,
@@ -330,16 +344,67 @@ document.addEventListener('DOMContentLoaded', function() {
             })
             .catch(error => {
                 console.error('Error checking availability:', error);
-                resForm.submit();
+                setAvailabilityState('Unable to verify availability. Please try again.', false);
             });
     }
 
     const confirmButton = document.getElementById('confirmReservation');
     const cancelButton = document.getElementById('cancelReservation');
 
+    function setAvailabilityState(message, isConflict) {
+        const conflictIndicator = document.getElementById('time-conflict-indicator');
+        if (confirmButton) {
+            confirmButton.disabled = Boolean(isConflict);
+            confirmButton.classList.toggle('disabled', Boolean(isConflict));
+        }
+        if (!conflictIndicator) return;
+
+        if (isConflict) {
+            conflictIndicator.textContent = `⚠️ ${message || 'Time conflict detected.'}`;
+            conflictIndicator.classList.remove('d-none');
+            conflictIndicator.className = 'alert alert-danger py-2 px-3 text-center mb-0 border-0 shadow-sm small fw-semibold';
+        } else {
+            conflictIndicator.textContent = '';
+            conflictIndicator.classList.add('d-none');
+            conflictIndicator.classList.remove('alert-danger', 'bg-danger');
+        }
+    }
+
+    async function validateSelectedTimeSlot() {
+        const hasRequiredValues = roomId?.value && startTime?.value && (openTimeToggle?.checked || endTime?.value);
+        if (!hasRequiredValues) {
+            setAvailabilityState('', false);
+            return;
+        }
+
+        const checkUrl = `/admin/check_availability?room_id=${encodeURIComponent(roomId.value)}&start=${encodeURIComponent(startTime.value)}&end=${encodeURIComponent(endTime.value || '')}&open_time=${Boolean(openTimeToggle?.checked)}`;
+        try {
+            const response = await fetch(checkUrl, { headers: { 'Cache-Control': 'no-cache' } });
+            const data = await response.json();
+            setAvailabilityState(data.status === 'conflict' ? data.message : '', data.status === 'conflict');
+        } catch (error) {
+            console.error('Availability validation error:', error);
+            setAvailabilityState('', false);
+        }
+    }
+
+    if (confirmButton && !document.getElementById('time-conflict-indicator')) {
+        const conflictIndicator = document.createElement('div');
+        conflictIndicator.id = 'time-conflict-indicator';
+        conflictIndicator.style.display = 'none';
+        conflictIndicator.style.marginTop = '8px';
+        confirmButton.parentElement?.insertBefore(conflictIndicator, confirmButton);
+    }
+
     if (confirmButton) {
         confirmButton.addEventListener('click', confirmReservation);
     }
+
+    [roomId, startTime, endTime, durationSelect, openTimeToggle].forEach(element => {
+        if (!element) return;
+        element.addEventListener('change', validateSelectedTimeSlot);
+        element.addEventListener('input', validateSelectedTimeSlot);
+    });
 
     if (cancelButton) {
         cancelButton.addEventListener('click', () => window.location.reload());

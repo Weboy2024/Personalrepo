@@ -190,6 +190,53 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    function showEmptyAttendanceState() {
+        const tableBody = document.querySelector('#recent-attendance-tbody')
+            || document.querySelector('#recent-attendance-table tbody');
+        if (!tableBody) return;
+
+        tableBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4" style="font-size: 13px;"><em>No recent attendance history available.</em></td></tr>';
+    }
+
+    document.querySelectorAll('.attendance-delete-button').forEach((button) => {
+        button.addEventListener('click', async () => {
+            const logId = button.dataset.attendanceId;
+            if (!logId || !window.confirm('Remove this attendance record from your view?')) return;
+
+            button.disabled = true;
+            try {
+                const response = await fetch(`/api/customer/attendance/${logId}/delete`, { method: 'DELETE' });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.message || 'Unable to remove attendance record.');
+
+                document.getElementById(`attendance-row-${logId}`)?.remove();
+                if (!document.querySelector('#recent-attendance-tbody tr')) showEmptyAttendanceState();
+            } catch (error) {
+                button.disabled = false;
+                console.error('Error deleting attendance record:', error);
+            }
+        });
+    });
+
+    const clearAttendanceButton = document.getElementById('btn-clear-all-attendance');
+    if (clearAttendanceButton) {
+        clearAttendanceButton.addEventListener('click', async () => {
+            if (!window.confirm('Are you sure you want to clear all attendance history?')) return;
+
+            clearAttendanceButton.disabled = true;
+            try {
+                const response = await fetch('/api/customer/attendance/clear-all', { method: 'DELETE' });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.message || 'Unable to clear attendance history.');
+                showEmptyAttendanceState();
+            } catch (error) {
+                console.error('Error clearing attendance history:', error);
+            } finally {
+                clearAttendanceButton.disabled = false;
+            }
+        });
+    }
+
     // 6. Notification System
     function showNotification(message) {
     const container = document.getElementById('notificationContainer');
@@ -251,6 +298,63 @@ document.addEventListener('DOMContentLoaded', function() {
   // === 7. SESSION DURATION & LIVE TIMER ENGINE ===
     const membershipCard = document.getElementById('membershipCard');
     let sessionIntervalId = null;
+    let liveMembershipCountdownInterval = null;
+    let liveMembershipRemainingSeconds = 0;
+    const previousMemberState = {
+        isCheckedIn: null,
+        membershipStatus: null,
+        isInitialized: false,
+        reloadRequested: false,
+    };
+
+    function formatMembershipTimestamp(isoValue) {
+        const timestamp = parseISOToTimestamp(isoValue);
+        if (!timestamp) return null;
+        return new Date(timestamp).toLocaleString('en-US', {
+            month: 'long',
+            day: 'numeric',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true
+        });
+    }
+
+    function renderLiveMembershipCountdown() {
+        const countdownEl = document.getElementById('membershipExpiryCountdown');
+        const remainingHoursEl = document.querySelector('#remainingHours .hours-value');
+        const totalSeconds = Math.max(0, Math.floor(liveMembershipRemainingSeconds));
+        const formatted = formatHMS(totalSeconds);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+
+        if (countdownEl) countdownEl.textContent = formatted;
+        if (remainingHoursEl) remainingHoursEl.textContent = `${hours}h ${minutes}m ${seconds}s`;
+    }
+
+    function startLiveMembershipCountdown(remainingSeconds) {
+        liveMembershipRemainingSeconds = Math.max(0, Number(remainingSeconds) || 0);
+        if (liveMembershipCountdownInterval) {
+            clearInterval(liveMembershipCountdownInterval);
+        }
+
+        renderLiveMembershipCountdown();
+        liveMembershipCountdownInterval = setInterval(() => {
+            const isPaused = document.getElementById('membershipExpiryCountdown')?.getAttribute('data-is-paused') === 'true';
+            if (!isPaused && liveMembershipRemainingSeconds > 0) {
+                liveMembershipRemainingSeconds -= 1;
+            }
+            renderLiveMembershipCountdown();
+        }, 1000);
+    }
+
+    function stopLiveMembershipCountdown() {
+        if (liveMembershipCountdownInterval) {
+            clearInterval(liveMembershipCountdownInterval);
+            liveMembershipCountdownInterval = null;
+        }
+    }
 
     // Helper formatting functions
     function formatHMS(seconds) {
@@ -403,7 +507,59 @@ document.addEventListener('DOMContentLoaded', function() {
             if (!statusRes.ok) return;
             const statusData = await statusRes.json();
 
-            if (statusData.status !== 'success') return;
+            const isNoMembership = statusData.status === 'error'
+                && statusData.message === 'No membership found';
+            if (statusData.status !== 'success' && !isNoMembership) return;
+
+            const currentMemberState = {
+                isCheckedIn: Boolean(statusData.is_checked_in),
+                membershipStatus: String(
+                    statusData.membership_status
+                    || statusData.member_status
+                    || (isNoMembership ? 'NONE' : 'UNKNOWN')
+                ).toUpperCase(),
+            };
+
+            if (!previousMemberState.isInitialized) {
+                previousMemberState.isCheckedIn = currentMemberState.isCheckedIn;
+                previousMemberState.membershipStatus = currentMemberState.membershipStatus;
+                previousMemberState.isInitialized = true;
+            } else {
+                const checkInChanged = previousMemberState.isCheckedIn !== currentMemberState.isCheckedIn;
+                const statusChanged = previousMemberState.membershipStatus !== currentMemberState.membershipStatus;
+
+                previousMemberState.isCheckedIn = currentMemberState.isCheckedIn;
+                previousMemberState.membershipStatus = currentMemberState.membershipStatus;
+
+                if ((checkInChanged || statusChanged) && !previousMemberState.reloadRequested) {
+                    previousMemberState.reloadRequested = true;
+                    window.location.reload();
+                    return;
+                }
+            }
+
+            if (isNoMembership) return;
+
+            const planNameEl = document.querySelector('#membershipCard .membership-plan');
+            if (planNameEl && statusData.plan_name) {
+                planNameEl.textContent = statusData.plan_name;
+            }
+
+            const totalHoursEl = document.querySelector('#totalHours .hours-value');
+            const remainingHoursEl = document.querySelector('#remainingHours .hours-value');
+            const formatHours = (seconds) => {
+                const totalSeconds = Math.max(0, Math.round(Number(seconds) || 0));
+                const hours = Math.floor(totalSeconds / 3600);
+                const minutes = Math.floor((totalSeconds % 3600) / 60);
+                const remainder = totalSeconds % 60;
+                return `${hours}h ${minutes}m ${remainder}s`;
+            };
+            if (totalHoursEl && statusData.total_seconds !== undefined) {
+                totalHoursEl.textContent = formatHours(statusData.total_seconds);
+            }
+            if (remainingHoursEl && !statusData.is_checked_in && statusData.total_seconds !== undefined) {
+                remainingHoursEl.textContent = formatHours(statusData.total_seconds);
+            }
 
             const dashboardStatus = (statusData.member_status || '').toUpperCase();
             const statusDetail = Array.from(document.querySelectorAll('#membershipCard .detail-item'))
@@ -424,9 +580,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
             const membershipBadge = document.querySelector('#membershipCard .membership-badge');
             if (membershipBadge) {
-                membershipBadge.classList.toggle('active', Boolean(statusData.is_checked_in));
-                membershipBadge.classList.toggle('expired', !statusData.is_checked_in);
-                membershipBadge.textContent = statusData.is_checked_in ? 'ACTIVE' : 'INACTIVE';
+                membershipBadge.classList.toggle('active', Boolean(statusData.is_checked_in || statusData.is_active));
+                membershipBadge.classList.toggle('expired', !statusData.is_checked_in && !statusData.is_active);
+                membershipBadge.textContent = statusData.is_checked_in ? 'IN LOUNGE' : 'READY TO CHECK IN';
             }
 
             // Update Badge Status sa Screen
@@ -489,6 +645,21 @@ document.addEventListener('DOMContentLoaded', function() {
                             updateSessionTimer();
                         }
                     }
+
+                    if (sessionData.status === 'success') {
+                        const startedOnEl = document.getElementById('startedOnDisplay');
+                        const expiresOnEl = document.getElementById('expiresOnDisplay');
+                        const startedText = formatMembershipTimestamp(sessionData.check_in_time);
+                        const expiresText = formatMembershipTimestamp(statusData.expiry_date);
+
+                        if (startedOnEl && startedText) startedOnEl.textContent = startedText;
+                        if (expiresOnEl && expiresText) expiresOnEl.textContent = expiresText;
+
+                        if (countdownEl) {
+                            countdownEl.setAttribute('data-expiry', statusData.expiry_date || '');
+                        }
+                        startLiveMembershipCountdown(sessionData.remaining_seconds ?? statusData.remaining_seconds);
+                    }
                 }
             } else {
                 // Kon wala nakacheck-in, reset attributes & DOM displays
@@ -496,6 +667,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     clearInterval(sessionIntervalId);
                     sessionIntervalId = null;
                 }
+                stopLiveMembershipCountdown();
                 if (timerContainer) {
                     timerContainer.setAttribute('data-is-paused', 'false');
                     timerContainer.removeAttribute('data-checkin-time');

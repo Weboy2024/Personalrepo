@@ -148,6 +148,32 @@ body {
     margin-bottom: 18px;
 }
 
+.session-activity-list {
+    max-height: 195px;
+    overflow-y: auto;
+    padding-right: 8px;
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 #f8f9fa;
+}
+
+.session-activity-list::-webkit-scrollbar {
+    width: 5px;
+}
+
+.session-activity-list::-webkit-scrollbar-track {
+    background: #f8f9fa;
+    border-radius: 4px;
+}
+
+.session-activity-list::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 4px;
+}
+
+.session-activity-list::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}
+
 /* History Card Styling */
 .recent-logs-section { 
     border-top: 1px solid #eee; 

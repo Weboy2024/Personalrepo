@@ -217,6 +217,35 @@ body .main-wrapper, body {
     margin-bottom: 24px;
 }
 
+.common-area-active-cards-scroll {
+    max-height: 285px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 8px;
+    padding-bottom: 12px;
+    margin-bottom: 1.5rem;
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 #f1f5f9;
+}
+
+.common-area-active-cards-scroll::-webkit-scrollbar {
+    width: 6px;
+}
+
+.common-area-active-cards-scroll::-webkit-scrollbar-track {
+    background: #f1f5f9;
+    border-radius: 4px;
+}
+
+.common-area-active-cards-scroll::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 4px;
+}
+
+.common-area-active-cards-scroll::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}
+
 /* Room Card */
 .room-card {
     background: #ffffff;
@@ -956,4 +985,50 @@ html[data-theme="dark"] .occupants-header {
 html[data-theme="dark"] .occupant-item {
     background: rgba(255, 255, 255, 0.08);
     border-left-color: rgba(255, 255, 255, 0.25);
+}
+
+.waiting-items {
+    max-height: 220px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 #f1f5f9;
+}
+
+.waiting-items::-webkit-scrollbar {
+    width: 6px;
+}
+
+.waiting-items::-webkit-scrollbar-track {
+    background: #f1f5f9;
+    border-radius: 4px;
+}
+
+.waiting-items::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 4px;
+}
+
+.waiting-items::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}
+
+/* Keep walk-in modal select text vertically centered and fully visible. */
+#walkinModal select,
+#walkinModal select.modern-select,
+#walkinModal select.form-select,
+#walkinModal select.form-control {
+    height: auto !important;
+    min-height: 42px !important;
+    padding: 0.5rem 2.25rem 0.5rem 0.75rem !important;
+    line-height: 1.5 !important;
+    font-size: 0.95rem !important;
+    box-sizing: border-box !important;
+    vertical-align: middle !important;
+    appearance: auto !important;
+}
+
+#walkinModal .form-control {
+    min-height: 42px !important;
+    line-height: 1.5 !important;
 }

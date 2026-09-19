@@ -48,8 +48,8 @@
                             <small class="text-muted">{{ res.start_time.strftime('%I:%M %p') }} - {{ res.end_time.strftime('%I:%M %p') if res.end_time else 'Open' }}</small>
                         </td>
                         <td>
-                            <span class="badge bg-{{ 'success' if res.status == 'Confirmed' else 'secondary' if res.status == 'Cancelled' else 'warning' }}">
-                                {{ res.status }}
+                            <span class="badge bg-{{ 'primary' if res.status|lower in ['in_progress', 'checked-in', 'checked_in'] else 'success' if res.status|lower in ['confirmed', 'approved'] else 'secondary' if res.status|lower in ['cancelled', 'completed', 'expired'] else 'warning' }}">
+                                {{ 'In Progress' if res.status|lower in ['in_progress', 'checked-in', 'checked_in'] else res.status }}
                             </span>
                         </td>
                         <td>

@@ -1,6 +1,86 @@
 document.addEventListener('DOMContentLoaded', () => {
     // Global pause state flag
     let isSessionPaused = false;
+    let remainingSeconds = 0;
+
+    function formatRemainingTime(totalSeconds) {
+        const seconds = Math.max(0, Number(totalSeconds) || 0);
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const remainder = Math.floor(seconds % 60);
+        return `${String(hours).padStart(2, '0')}h ${String(minutes).padStart(2, '0')}m ${String(remainder).padStart(2, '0')}s`;
+    }
+
+    function renderSessionActivities(activities) {
+        const feedContainer = document.getElementById('customer-activity-feed');
+        if (!feedContainer) return;
+
+        feedContainer.replaceChildren();
+        if (!Array.isArray(activities) || activities.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'text-muted small py-2';
+            empty.textContent = 'No activities recorded.';
+            feedContainer.appendChild(empty);
+            return;
+        }
+
+        activities.forEach(activity => {
+            const item = document.createElement('div');
+            item.className = 'activity-item py-2 border-bottom d-flex justify-content-between align-items-center';
+
+            const details = document.createElement('div');
+            const title = document.createElement('strong');
+            const action = String(activity.title || 'Session activity');
+            title.className = `${action.toLowerCase().includes('pause') ? 'text-warning' : 'text-success'} d-block`;
+            title.style.fontSize = '14px';
+            title.textContent = action;
+
+            const description = document.createElement('small');
+            description.className = 'text-muted';
+            description.style.fontSize = '12px';
+            description.textContent = activity.description || 'Session activity';
+            details.append(title, description);
+
+            const timestamp = document.createElement('span');
+            timestamp.className = 'text-muted small';
+            timestamp.textContent = activity.timestamp || '-';
+            item.append(details, timestamp);
+            feedContainer.appendChild(item);
+        });
+    }
+
+    function renderLoungeSessionState(sessionData) {
+        const noSessionView = document.getElementById('no-active-session-view');
+        const activeSessionView = document.getElementById('active-session-view');
+        const isActive = Boolean(sessionData && sessionData.is_checked_in && sessionData.is_active !== false);
+
+        if (!isActive) {
+            remainingSeconds = 0;
+            noSessionView?.classList.remove('d-none');
+            activeSessionView?.classList.add('d-none');
+            return;
+        }
+
+        noSessionView?.classList.add('d-none');
+        activeSessionView?.classList.remove('d-none');
+
+        const planName = document.getElementById('customer-plan-name');
+        const countdown = document.getElementById('customer-countdown-timer');
+        const statusBadge = document.getElementById('customer-status-badge');
+        if (planName) planName.textContent = sessionData.plan_name || 'INDIVIDUAL RATE';
+        remainingSeconds = Math.max(0, Number(sessionData.remaining_seconds) || 0);
+        if (countdown) countdown.textContent = formatRemainingTime(remainingSeconds);
+        if (statusBadge) {
+            statusBadge.textContent = sessionData.is_paused ? 'Paused' : 'Checked In';
+            statusBadge.className = sessionData.is_paused ? 'badge bg-warning text-dark' : 'badge bg-success';
+        }
+    }
+
+    setInterval(() => {
+        if (!isSessionPaused && remainingSeconds > 0) remainingSeconds -= 1;
+        const countdown = document.getElementById('customer-countdown-timer');
+        if (countdown) countdown.textContent = formatRemainingTime(remainingSeconds);
+    }, 1000);
 
     // 1. Digital Clock
     function updateClock() {
@@ -12,6 +92,8 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         const clockEl = document.getElementById('clock');
         if (clockEl) clockEl.textContent = now.toLocaleString('en-US', options);
+        const liveTimeEl = document.getElementById('current-live-time');
+        if (liveTimeEl) liveTimeEl.textContent = now.toLocaleString('en-US', options);
     }
     setInterval(updateClock, 1000);
     updateClock();
@@ -24,6 +106,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!data || data.status !== 'success') return;
 
                 isSessionPaused = Boolean(data.is_paused);
+                renderLoungeSessionState(data);
+                renderSessionActivities(data.activities);
 
                 // Update Status Badge (Active vs Paused vs Not Checked In)
                 const statusBadge = document.getElementById('sessionStatusBadge');

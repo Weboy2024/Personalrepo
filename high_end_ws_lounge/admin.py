@@ -154,6 +154,71 @@ def require_admin_or_staff_json():
         return jsonify({"status": "error", "message": "Access restricted"}), 403
 
 
+def auto_start_due_reservations(now=None):
+    """Start due confirmed reservations once using existing attendance records."""
+    now = now or (datetime.utcnow() + timedelta(hours=8))
+    due_reservations = Reservation.query.filter(
+        Reservation.status.in_(["Confirmed", "APPROVED", "CONFIRMED"]),
+        Reservation.start_time <= now,
+    ).all()
+    changed = False
+
+    for reservation in due_reservations:
+        if not reservation.user_id:
+            continue
+
+        membership = Membership.query.filter_by(user_id=reservation.user_id).first()
+        if not membership:
+            continue
+
+        existing_session = AttendanceLog.query.filter(
+            AttendanceLog.membership_id == membership.id,
+            AttendanceLog.check_out_time.is_(None),
+        ).first()
+        if existing_session:
+            reservation.status = "Checked-in"
+            changed = True
+            continue
+
+        end_time = reservation.end_time or (reservation.start_time + timedelta(hours=1))
+        duration_hours = max(0.0, (end_time - reservation.start_time).total_seconds() / 3600)
+        db.session.add(AttendanceLog(
+            membership_id=membership.id,
+            check_in_time=now,
+            accumulated_paused_seconds=0,
+        ))
+        membership.is_checked_in = True
+        membership.is_checked_out = False
+        membership.status = "active"
+        membership.start_date = now
+        membership.expiry_date = end_time
+        membership.total_hours = duration_hours
+        membership.hours_left = duration_hours
+        reservation.status = "Checked-in"
+        changed = True
+
+    if changed:
+        db.session.commit()
+
+
+def get_common_area_dashboard_counts(now):
+    active_walkins_count = Reservation.query.join(Room).filter(
+        Room.name.ilike("common area"),
+        Reservation.status.in_(["Confirmed", "Walk-in"]),
+        Reservation.start_time <= now,
+        or_(Reservation.is_open_time == True, Reservation.end_time >= now),
+    ).count()
+
+    active_members_count = db.session.query(AttendanceLog.id).join(Membership).filter(
+        Membership.status == "active",
+        Membership.is_checked_in == True,
+        AttendanceLog.check_out_time.is_(None),
+    ).count()
+
+    occupied_count = active_walkins_count + active_members_count
+    return active_walkins_count, active_members_count, occupied_count
+
+
 def _solo_plan_credit_hours(plan_name):
     plan_key = (plan_name or "").strip().upper()
     hour_mapping = {
@@ -376,6 +441,11 @@ def get_active_room_reservations(rooms):
 
     room_reservations = {}
     for res in reservations:
+        # Future reservations belong to the Reservation/Waiting List, not the
+        # Live Room Status grid. Only current sessions can occupy a room card.
+        if not is_current(res):
+            continue
+
         existing = room_reservations.get(res.room_id)
         if existing is None:
             room_reservations[res.room_id] = res
@@ -436,16 +506,39 @@ def check_availability():
         else:
             end_dt = start_dt + timedelta(hours=1)
 
-        if not is_common_area:
-            conflict = Reservation.check_conflict(room_id, start_dt, end_dt)
-            if conflict:
-                return jsonify(
-                    {
-                        "status": "conflict",
-                        "message": "Selected room is not available for the requested time.",
-                    }
-                )
-        else:
+        conflict = Reservation.query.filter(
+            Reservation.room_id == room_id,
+            Reservation.status.in_(["Confirmed", "APPROVED", "Pending", "Walk-in", "Checked-in"]),
+            Reservation.start_time < end_dt,
+            Reservation.end_time.isnot(None),
+            Reservation.end_time > start_dt,
+        ).first()
+        if conflict:
+            return jsonify({
+                "status": "conflict",
+                "message": f"Time Conflict: Reserved until {conflict.end_time.strftime('%I:%M %p')}",
+            })
+
+        active_session = db.session.query(AttendanceLog).join(Membership).join(
+            Reservation,
+            Reservation.user_id == Membership.user_id,
+        ).filter(
+            Reservation.room_id == room_id,
+            Reservation.status.in_(["Confirmed", "Checked-in", "Walk-in"]),
+            AttendanceLog.check_out_time.is_(None),
+            Membership.is_checked_in == True,
+            Membership.status == "active",
+            AttendanceLog.check_in_time < end_dt,
+            Membership.expiry_date.isnot(None),
+            Membership.expiry_date > start_dt,
+        ).first()
+        if active_session and not is_common_area:
+            return jsonify({
+                "status": "conflict",
+                "message": "Time Conflict: Room is occupied by an active session.",
+            })
+
+        if is_common_area:
             current_occupancy = get_common_area_count() if 'get_common_area_count' in globals() else 0
             if current_occupancy >= 70:
                 return jsonify(
@@ -474,6 +567,7 @@ def dashboard():
 
     ph_tz = pytz.timezone("Asia/Manila")
     now = datetime.now(ph_tz).replace(tzinfo=None)
+    auto_start_due_reservations(now)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
 
@@ -566,7 +660,7 @@ def dashboard():
             Reservation.end_time >= today_start,
             Reservation.is_open_time == True
         ),
-        Reservation.status.in_(["Confirmed", "Walk-in", "Ended"]),
+        Reservation.status.in_(["Confirmed", "Checked-in", "Walk-in", "Ended"]),
     ).all()
 
     active_reservations = sorted(all_res, key=lambda x: (x.status != "Ended", x.end_time if x.end_time else datetime.max))
@@ -615,7 +709,7 @@ def dashboard():
         key=lambda r: r.end_time if r.end_time is not None else datetime.max
     )
 
-    common_area_occupancy = get_common_area_count()
+    _, _, common_area_occupancy = get_common_area_dashboard_counts(now)
     common_area_available_slots = max(0, 70 - common_area_occupancy)
 
     return render_template(
@@ -637,6 +731,79 @@ def dashboard():
         common_area_available_slots=common_area_available_slots,
         now=now,
     )
+
+
+@admin_bp.route("/api/dashboard/room-status", methods=["GET"])
+@login_required
+def dashboard_room_status():
+    redirect_response = require_admin_or_staff_json()
+    if redirect_response:
+        return redirect_response
+
+    ph_tz = pytz.timezone("Asia/Manila")
+    now = datetime.now(ph_tz).replace(tzinfo=None)
+    active_walkins_count, active_members_count, occupied_count = get_common_area_dashboard_counts(now)
+    rooms = Room.query.filter(~Room.name.ilike('Test Room%')).all()
+    active_reservations = get_active_room_reservations(rooms)
+    room_statuses = []
+    for room in rooms:
+        reservation = active_reservations.get(room.id)
+        room_statuses.append({
+            "id": room.id,
+            "name": room.name,
+            "status": "OCCUPIED" if reservation else "AVAILABLE",
+            "occupant_name": reservation.customer_name if reservation else None,
+            "start_time": reservation.start_time.isoformat() if reservation else None,
+            "end_time": reservation.end_time.isoformat() if reservation and reservation.end_time else None,
+        })
+
+    return jsonify({
+        "status": "success",
+        "success": True,
+        "capacity": 70,
+        "occupied": occupied_count,
+        "available": max(0, 70 - occupied_count),
+        "walkins_count": active_walkins_count,
+        "members_count": active_members_count,
+        "common_area": {
+            "capacity": 70,
+            "occupied": occupied_count,
+            "available": max(0, 70 - occupied_count),
+        },
+        "rooms": room_statuses,
+    })
+
+@admin_bp.route("/api/dashboard/today-waiting-list", methods=["GET"])
+@login_required
+def dashboard_today_waiting_list():
+    redirect_response = require_admin_or_staff_json()
+    if redirect_response:
+        return redirect_response
+
+    now = datetime.now(pytz.timezone("Asia/Manila")).replace(tzinfo=None)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + timedelta(days=1)
+    reservations = Reservation.query.filter(
+        Reservation.start_time >= now,
+        Reservation.start_time < today_end,
+        func.lower(Reservation.status).in_(["confirmed", "approved"]),
+    ).order_by(Reservation.start_time.asc()).all()
+
+    waiting_list = [{
+        "id": reservation.id,
+        "customer_name": reservation.customer_name or "Guest",
+        "room_name": reservation.room.name if reservation.room else "Common Area",
+        "start_time": reservation.start_time.strftime("%I:%M %p"),
+        "end_time": reservation.end_time.strftime("%I:%M %p") if reservation.end_time else "Open",
+        "status": reservation.status,
+    } for reservation in reservations]
+
+    return jsonify({
+        "status": "success",
+        "count": len(waiting_list),
+        "waiting_list": waiting_list,
+    })
+
 
 @admin_bp.route("/toggle_pause_reservation/<int:reservation_id>", methods=["POST"])
 @login_required
@@ -665,11 +832,7 @@ def toggle_pause_reservation(reservation_id):
             current_accumulated = reservation.accumulated_paused_seconds or 0
             reservation.accumulated_paused_seconds = current_accumulated + int(paused_seconds)
 
-            # UPDATED CODE
-            if not reservation.is_open_time and reservation.end_time:
-                reservation.end_time = reservation.end_time + timedelta(seconds=paused_seconds)
-            
-            # Kon Fixed Time, i-move man ang end_time para extended ang session exact sa pause time
+            # Extend fixed-duration sessions by the full paused interval.
             if not reservation.is_open_time and reservation.end_time:
                 reservation.end_time = reservation.end_time + timedelta(seconds=paused_seconds)
 
@@ -1005,17 +1168,37 @@ def walkin_checkin_modal():
                 end_time = start_time + timedelta(hours=1)
 
         if room.name.strip().lower() != "common area":
-            conflict = Reservation.query.filter(
+            reservation_query = Reservation.query.filter(
                 Reservation.room_id == room.id,
-                Reservation.status.in_( ["Confirmed", "Walk-in", "Pending"] ),
-                Reservation.start_time < end_time,
-                Reservation.end_time > start_time,
-            ).first()
+                func.lower(Reservation.status).in_(
+                    ["confirmed", "approved", "in_progress", "checked-in", "walk-in", "pending"]
+                ),
+            )
+            conflict = None
+            for reservation in reservation_query.all():
+                reservation_end = reservation.end_time
+                if reservation.is_open_time or reservation_end is None:
+                    overlaps = start_time >= reservation.start_time
+                else:
+                    overlaps = start_time < reservation_end and end_time > reservation.start_time
+
+                if overlaps:
+                    conflict = reservation
+                    break
 
             if conflict:
-                flash(
-                    f"Conflict! {room.name} is already occupied or reserved by {conflict.customer_name} from {conflict.start_time.strftime('%I:%M %p')} to {conflict.end_time.strftime('%I:%M %p')}."
+                conflict_start = conflict.start_time.strftime('%I:%M %p')
+                conflict_end = (
+                    conflict.end_time.strftime('%I:%M %p')
+                    if conflict.end_time else "open time"
                 )
+                conflict_message = (
+                    f"⚠️ Time Conflict: Room has an upcoming reservation from "
+                    f"{conflict_start} to {conflict_end}."
+                )
+                if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+                    return jsonify({"success": False, "message": conflict_message}), 400
+                flash(conflict_message, "danger")
                 return redirect(url_for("admin.dashboard"))
         else:
             #UPDATED CODE
@@ -1090,6 +1273,11 @@ def walkin_checkin_modal():
         db.session.commit()
 
         current_app.logger.debug("Walk-in created: %s", new_walkin.customer_name)
+        if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+            return jsonify({
+                "success": True,
+                "message": "Walk-in checked in successfully.",
+            })
         flash(f"Walk-in {new_walkin.customer_name} added successfully!")
         return redirect(url_for("admin.dashboard"))
 
@@ -1384,6 +1572,20 @@ def admin_reservations():
                         full_end = full_start + timedelta(hours=1)
 
                 # Overlap checking for non-common area
+                reservation_conflict = Reservation.query.filter(
+                    Reservation.room_id == room.id,
+                    Reservation.status.in_(["Confirmed", "APPROVED", "Pending", "Walk-in", "Checked-in"]),
+                    Reservation.start_time < full_end,
+                    Reservation.end_time.isnot(None),
+                    Reservation.end_time > full_start,
+                ).first()
+                if reservation_conflict:
+                    flash(
+                        f"Time Conflict: Reserved until {reservation_conflict.end_time.strftime('%I:%M %p')}",
+                        "danger",
+                    )
+                    return render_template("admin/admin_reservations.html", form=form, rooms=rooms)
+
                 if room_name_lower != "common area":
                     conflict = Reservation.query.filter(
                         Reservation.room_id == room.id,
@@ -1426,7 +1628,9 @@ def admin_reservations():
                 start_time=full_start,
                 end_time=full_end,
                 is_open_time=is_open_time,
-                status="Pending",
+                # Admin-created reservations are already approved; pending is
+                # reserved for customer-submitted requests awaiting review.
+                status="Confirmed",
                 added_by=current_user.name,
                 extra_notes=form.extra_notes.data,
                 extra_fee=float(form.extra_fee.data) if form.extra_fee.data else 0.0,
@@ -1484,8 +1688,8 @@ def admin_reservations():
 
             db.session.commit()
 
-            flash("Reservation added! It will appear on dashboard once it starts.")
-            return redirect(url_for("admin.dashboard"))
+            flash("Reservation added to the Reservation List.", "success")
+            return redirect(url_for("admin.admin_reservations_list"))
 
     return render_template("admin/admin_reservations.html", form=form, rooms=rooms)
 
@@ -1497,26 +1701,22 @@ def admin_reservations_list():
     if redirect_response:
         return redirect_response
     search = request.args.get("search", "")
-    # Only show reservations that are clearly legitimate in the main list:
-    # - Walk-ins (staff-registered in-person)
-    # - On Hold (clients who paid a downpayment and were placed on hold)
-    # - Confirmed & paid reservations created by staff (not online full-pay clients)
-
-    base_query = Reservation.query
-    # Build filter: include Walk-in and On Hold always; include Confirmed+paid only if created by staff or no user
-    query = base_query.filter(
-        or_(
-            Reservation.status == "On Hold",
-            Reservation.status == "Walk-in",
-            and_(
-                Reservation.status == "Confirmed",
-                Reservation.paid == True,
-                or_(
-                    Reservation.user_id.is_(None),
-                    Reservation.user.has(User.role.in_(["admin", "staff"])),
-                ),
-            ),
-        )
+    # Keep pending customer requests on the separate confirmation page, but
+    # retain confirmed and active same-day reservations in this list.
+    query = Reservation.query.filter(
+        func.lower(Reservation.status).in_([
+            "confirmed",
+            "approved",
+            "in_progress",
+            "checked-in",
+            "checked_in",
+            "on hold",
+        ]),
+        ~func.lower(Reservation.status).in_([
+            "completed",
+            "cancelled",
+            "expired",
+        ]),
     )
 
     if search:
@@ -2871,6 +3071,7 @@ def common_area_occupants():
 
     ph_tz = pytz.timezone("Asia/Manila")
     now_ph = datetime.now(ph_tz)
+    auto_start_due_reservations(now_ph.replace(tzinfo=None))
 
     checked_in = db.session.query(Membership).filter(
         Membership.is_checked_in == True

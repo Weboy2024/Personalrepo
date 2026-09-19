@@ -4,10 +4,10 @@ Contains all client-facing blueprints: auth, main, and api.
 """
 
 import os
+import logging
 from datetime import datetime, timedelta
 import pytz
 import stripe
-import resend
 
 from database_fixed import (
     db,
@@ -21,11 +21,13 @@ from database_fixed import (
     ProfileForm,
     Reservation,
     AttendanceLog,
+    UserActivityLog,
     ReservationForm,
     RegistrationForm,
     ChangePasswordForm,
     generate_customer_id,
     get_user_by_email,
+    mail,
 )
 from flask import (
     flash,
@@ -48,6 +50,55 @@ from itsdangerous import URLSafeTimedSerializer
 # Auth Blueprint
 auth_bp = Blueprint("auth", __name__)
 main_bp = Blueprint('main', __name__, template_folder='templates')
+
+
+def _customer_hidden_attendance_ids():
+    return {
+        int(log_id)
+        for log_id in session.get("customer_hidden_attendance_ids", [])
+        if str(log_id).isdigit()
+    }
+
+
+def _save_customer_hidden_attendance_ids(log_ids):
+    session["customer_hidden_attendance_ids"] = sorted(log_ids)
+    session.modified = True
+
+
+@main_bp.route("/api/customer/attendance/<int:log_id>/delete", methods=["DELETE"])
+@login_required
+def delete_customer_attendance(log_id):
+    log = (
+        AttendanceLog.query
+        .join(Membership)
+        .filter(AttendanceLog.id == log_id, Membership.user_id == current_user.id)
+        .first()
+    )
+    if not log:
+        return jsonify({"success": False, "message": "Attendance record not found."}), 404
+
+    hidden_ids = _customer_hidden_attendance_ids()
+    hidden_ids.add(log.id)
+    _save_customer_hidden_attendance_ids(hidden_ids)
+    return jsonify({"success": True, "message": "Attendance record removed."})
+
+
+@main_bp.route("/api/customer/attendance/clear-all", methods=["DELETE"])
+@login_required
+def clear_customer_attendance():
+    membership_ids = [
+        membership.id
+        for membership in Membership.query.filter_by(user_id=current_user.id).all()
+    ]
+    if membership_ids:
+        log_ids = db.session.query(AttendanceLog.id).filter(
+            AttendanceLog.membership_id.in_(membership_ids)
+        ).all()
+        _save_customer_hidden_attendance_ids({log_id for (log_id,) in log_ids})
+    else:
+        _save_customer_hidden_attendance_ids(set())
+
+    return jsonify({"success": True, "message": "All attendance history cleared."})
 
 
 def get_custom_tier_rate(room_name, pax_count, default_base_rate):
@@ -117,36 +168,28 @@ def forgot_password():
             reset_url = url_for("auth.reset_password", token=token, _external=True)
 
             try:
-                resend.api_key = os.environ.get("RESEND_API_KEY")
-
-                resend.Emails.send({
-                    "from": "WS Lounge <onboarding@resend.dev>",
-                    "to": ["juga.reyes.ui@phinmaed.com"],
-                    "subject": "WS Lounge - Password Reset Request",
-                    "html": f"""
-                    <p>Hello {user.name or 'Member'},</p>
-
-                    <p>A password reset was requested for your WS Lounge account.</p>
-
-                    <p>Please click the link below to reset your password. This link is valid for 30 minutes:</p>
-
-                    <p>
-                        <a href="{reset_url}">Reset My Password</a>
-                    </p>
-
-                    <p>If you did not request a password reset, please ignore this email.</p>
-
-                    <p>WS Students & Professionals Lounge</p>
-                    """
-                })
+                msg = Message(
+                    subject="WS Lounge - Password Reset Request",
+                    recipients=[email],
+                    body=(
+                        f"Hello {user.name or 'Member'},\n\n"
+                        "A password reset was requested for your WS Lounge account.\n\n"
+                        "Please click the link below to reset your password. "
+                        "This link is valid for 30 minutes:\n\n"
+                        f"{reset_url}\n\n"
+                        "If you did not request a password reset, please ignore this email.\n\n"
+                        "WS Students & Professionals Lounge"
+                    ),
+                )
+                mail.send(msg)
 
                 flash(
                     "A password reset link has been sent to your email. Please check your inbox or spam folder.",
                     "success"
                 )
 
-            except Exception as e:
-                print(f"Resend email error: {e}")
+            except Exception:
+                logging.exception("Password reset mail delivery failed for %s", email)
                 flash("Failed to send password reset email. Please try again later.", "danger")
 
         else:
@@ -234,10 +277,6 @@ def logout():
     session.pop("user_name", None)
     session.pop("user_role", None)
     return redirect(url_for("main.index"))
-
-
-# Main Blueprint
-main_bp = Blueprint("main", __name__)
 
 
 def get_admin_stats():
@@ -457,14 +496,19 @@ def dashboard():
         return redirect(url_for("admin.dashboard"))
 
     # 1. Fetch Membership Data
-    membership = Membership.query.filter_by(user_id=current_user.id).first()
+    membership = Membership.query.filter(
+        Membership.user_id == current_user.id,
+        func.lower(Membership.status).in_(["active", "approved", "pending_checkin"]),
+    ).order_by(Membership.updated_at.desc(), Membership.id.desc()).first()
     attendance_logs = []
     remaining_days = None
 
     if membership:
         _expire_membership_if_needed(membership)
+        hidden_attendance_ids = _customer_hidden_attendance_ids()
         attendance_logs = (
             AttendanceLog.query.filter_by(membership_id=membership.id)
+            .filter(~AttendanceLog.id.in_(hidden_attendance_ids) if hidden_attendance_ids else True)
             .order_by(AttendanceLog.check_in_time.desc())
             .limit(20)
             .all()
@@ -805,6 +849,20 @@ def rooms():
         pax_count_val = form.pax_count.data or 1
         if "lecture room" in room.name.lower() and pax_count_val > 15:
             flash("Lecture Room capacity is limited to a maximum of 15 persons only.", "danger")
+            return render_template("rooms.html", rooms=rooms, bookings=bookings, form=form, payment_info=payment_info, occupied_room_ids=occupied_room_ids, room_pax_count=room_pax_count)
+
+        reservation_conflict = Reservation.query.filter(
+            Reservation.room_id == room.id,
+            Reservation.status.in_(["Confirmed", "APPROVED", "Pending", "Walk-in", "Checked-in"]),
+            Reservation.start_time < end_time,
+            Reservation.end_time.isnot(None),
+            Reservation.end_time > start_time,
+        ).first()
+        if reservation_conflict:
+            flash(
+                f"Time Conflict: Reserved until {reservation_conflict.end_time.strftime('%I:%M %p')}",
+                "danger",
+            )
             return render_template("rooms.html", rooms=rooms, bookings=bookings, form=form, payment_info=payment_info, occupied_room_ids=occupied_room_ids, room_pax_count=room_pax_count)
 
         if "common area" in room.name.lower():
@@ -1664,7 +1722,10 @@ def membership_status():
     """Get current user's membership status"""
     ph_tz = pytz.timezone("Asia/Manila")
 
-    membership = Membership.query.filter_by(user_id=current_user.id).first()
+    membership = Membership.query.filter(
+        Membership.user_id == current_user.id,
+        func.lower(Membership.status).in_(["active", "approved", "pending_checkin"]),
+    ).order_by(Membership.updated_at.desc(), Membership.id.desc()).first()
     
     if not membership:
         return jsonify({"status": "error", "message": "No membership found"})
@@ -1706,6 +1767,34 @@ def membership_status():
             expiry_dt = ph_tz.localize(expiry_dt)
         expiry_iso = expiry_dt.isoformat()
 
+    activities = []
+    if active_log and active_log.check_in_time:
+        activity_query = UserActivityLog.query.filter(
+            UserActivityLog.user_id == membership.user_id,
+            UserActivityLog.activity_type.like("attendance|%"),
+            UserActivityLog.activity_time >= active_log.check_in_time,
+        ).order_by(UserActivityLog.activity_time.desc())
+
+        activity_descriptions = {
+            "Check-In": "Session started",
+            "Paused": "Session paused",
+            "Resumed": "Session resumed",
+        }
+        for activity in activity_query.limit(50).all():
+            action = activity.activity_type.split("|", 1)[-1]
+            activities.append({
+                "title": action,
+                "description": activity_descriptions.get(action, "Session activity"),
+                "timestamp": activity.activity_time.strftime("%b %d, %Y - %I:%M %p"),
+            })
+
+        if not activities:
+            activities.append({
+                "title": "Check-In",
+                "description": "Session started",
+                "timestamp": active_log.check_in_time.strftime("%b %d, %Y - %I:%M %p"),
+            })
+
     return jsonify({
         "status": "success",
         "hours_left": membership.hours_left,
@@ -1719,7 +1808,8 @@ def membership_status():
         "member_status": member_status,
         "plan_name": membership.plan_name,
         "expiry_date": expiry_iso,
-        "accumulated_hours": 0.0
+        "accumulated_hours": 0.0,
+        "activities": activities,
     })
 
 
